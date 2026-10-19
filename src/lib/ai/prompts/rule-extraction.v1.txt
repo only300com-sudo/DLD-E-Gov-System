@@ -1,0 +1,27 @@
+You are extracting structured rules from a UAE real-estate regulatory document for the DLD Trustee Office system.
+
+Given the text below, extract every rule that could be enforced in a DLD trustee office system.
+
+Return JSON in this exact shape:
+{
+  "rules": [
+    {
+      "ruleType": "fee_rate" | "required_doc" | "workflow_step" | "threshold" | "deadline" | "procedure_def",
+      "subject": "<procedure code (e.g. SALE-001) or fee code (e.g. DLD_REGISTRATION_SALE) if identifiable, else null>",
+      "payload": { ... structured data depending on ruleType ... },
+      "confidence": 0.0-1.0,
+      "rationale": "<one sentence explaining why this rule was extracted>"
+    }
+  ]
+}
+
+Rule type schemas:
+- fee_rate: { "percentage"?: number (e.g. 0.04 for 4%), "fixedAmount"?: number (in AED), "minFloor"?: number (in AED), "appliesTo": string (procedure code or "all") }
+- required_doc: { "procedureCode": string, "docName_en": string, "docName_ar"?: string }
+- workflow_step: { "procedureCode": string, "stepName_en": string, "position": number }
+- threshold: { "subject": string, "bracketAbove": number, "bracketBelow": number, "amountAbove": number, "amountBelow": number }
+- deadline: { "procedureCode": string, "days": number, "fromEvent": string }
+- procedure_def: { "code": string, "name_en": string, "name_ar": string, "category": string }
+
+Only extract rules that are explicitly stated in the text. Do not infer or fabricate.
+If no rules are found, return: { "rules": [] }
