@@ -1,0 +1,10 @@
+import fs from "fs/promises";
+import pdfParse from "pdf-parse";
+const buf = await fs.readFile("/home/z/my-project/download/watermarked-3-page-document.pdf");
+const data = await pdfParse(buf);
+console.log("=== Extracted text from watermarked PDF ===");
+console.log("Total pages:", data.numpages);
+console.log("Text length:", data.text.length);
+console.log("");
+console.log("=== First 1500 chars ===");
+console.log(data.text.substring(0, 1500));

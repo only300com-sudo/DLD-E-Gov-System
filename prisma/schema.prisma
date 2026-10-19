@@ -1,0 +1,3352 @@
+// Trustee Operations Portal — Prisma schema
+// Internal Trustee Office System — Not a DLD Submission Portal
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// USERS, ROLES, BRANCHES
+// ============================================================
+
+model User {
+  id                 String    @id @default(cuid())
+  email              String    @unique
+  name               String
+  nameAr             String?
+  passwordHash       String
+  role               UserRole
+  branchId           String?
+  branch             Branch?   @relation(fields: [branchId], references: [id])
+  active             Boolean   @default(true)
+  // Phase 7b.1 — TOTP MFA fields (replaces mfaEnabled/mfaSecret legacy fields below
+  // — legacy fields kept for backward compat until 7c)
+  mfaEnabled         Boolean   @default(false)
+  mfaSecret          String?
+  // Phase 7b.1 — Proper TOTP fields
+  totpSecret         String? // base32-encoded secret
+  totpEnabled        Boolean   @default(false)
+  totpBackupCodes    String? // JSON array of { code, used } (each code hashed with sha256)
+  totpSetupAt        DateTime?
+  lastTotpAttemptAt  DateTime?
+  failedTotpAttempts Int       @default(0)
+  lastLoginAt        DateTime?
+  failedAttempts     Int       @default(0)
+  lockedUntil        DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  casesAsReception          Case[]                       @relation("ReceptionCases")
+  casesAsOfficer            Case[]                       @relation("OfficerCases")
+  casesAsManager            Case[]                       @relation("ManagerCases")
+  appointments              Appointment[]
+  approvals                 Approval[]
+  auditLogs                 AuditLog[]
+  uploadedDocuments         Document[]
+  verifiedDocuments         Document[]                   @relation("VerifiedDocs")
+  notificationsSent         Notification[]
+  tasksAssigned             Task[]
+  comments                  Comment[]
+  agreementsWitness         Agreement[]                  @relation("WitnessedAgreements")
+  exceptionsReviewed        ExceptionRequest[]           @relation("ExceptionReviewer")
+  // Phase 3 — Handover & Return workflow back-relations
+  handoversCompleted        ReceptionHandoverChecklist[]
+  returnNotesIssued         ReturnNote[]                 @relation("ReturnNoteReturnedBy")
+  returnNotesTargeted       ReturnNote[]                 @relation("ReturnNoteTarget")
+  returnNotesResolved       ReturnNote[]                 @relation("ReturnNoteResolvedBy")
+  // Phase 3.1 — DelegationEvent back-relations
+  delegationEventsFrom      DelegationEvent[]            @relation("DelegationEventsFrom")
+  delegationEventsTo        DelegationEvent[]            @relation("DelegationEventsTo")
+  // Phase 4 — Fee ledger back-relations
+  feeLinesCreatedBy         FeeLine[]                    @relation("FeeLinesCreatedBy")
+  feeLinesUpdatedBy         FeeLine[]                    @relation("FeeLinesUpdatedBy")
+  feeReceiptsCollectedBy    FeeReceipt[]                 @relation("FeeReceiptsCollectedBy")
+  feeReceiptsVerifiedBy     FeeReceipt[]                 @relation("FeeReceiptsVerifiedBy")
+  feeReceiptsCreatedBy      FeeReceipt[]                 @relation("FeeReceiptsCreatedBy")
+  feeLineHistoryActor       FeeLineHistory[]             @relation("FeeLineHistoryActor")
+  // Phase 5 — DLD + messages back-relations
+  dldSubmissionsByOfficer   DldSubmission[]              @relation("DldSubmissionsByOfficer")
+  dldSubmissionsUpdatedBy   DldSubmission[]              @relation("DldSubmissionsUpdatedBy")
+  dldStatusHistoryChangedBy DldStatusHistory[]           @relation("DldStatusHistoryChangedBy")
+  clientMessagesCreatedBy   ClientMessage[]              @relation("ClientMessagesCreatedBy")
+  // Phase 6 — AI extractions
+  aiExtractionsTriggeredBy  AiExtraction[]               @relation("AiExtractionsTriggeredBy")
+  aiExtractionsReviewedBy   AiExtraction[]               @relation("AiExtractionsReviewedBy")
+  // Phase 7a — Real-time collaboration
+  caseEditLocksHeld         CaseEditLock[]               @relation("CaseEditLocksHeldBy")
+  sessions                  Session[]
+  // Phase 7b.2 — back-relations for compliance modules
+  dsrAssignedTo             DataSubjectRequest[]         @relation("DsrAssignedTo")
+  crossBorderRecordedBy     CrossBorderTransfer[]        @relation("CrossBorderRecordedBy")
+  legalHoldSetOnCases       Case[]                       @relation("LegalHoldSetBy")
+  // Phase 7c — pre-flight checklist back-relation
+  preflightChecks           PreflightCheck[]             @relation("PreflightCheckedBy")
+}
+
+model Session {
+  id                String   @id @default(cuid())
+  userId            String
+  user              User     @relation(fields: [userId], references: [id])
+  token             String   @unique
+  ip                String?
+  userAgent         String?
+  expiresAt         DateTime
+  // Phase 7b.1 — Session hardening fields
+  absoluteExpiresAt DateTime // hard cap at 12h from creation, regardless of activity
+  lastActivityAt    DateTime @default(now()) // updated on each authenticated request
+  rotatedFrom       String? // previous session token (for rotation tracking)
+  csrfToken         String? // double-submit CSRF token (one per session)
+  createdAt         DateTime @default(now())
+
+  @@index([userId, expiresAt])
+  @@index([absoluteExpiresAt])
+}
+
+model Branch {
+  id           String        @id @default(cuid())
+  name         String
+  nameAr       String?
+  address      String?
+  phone        String?
+  email        String?
+  active       Boolean       @default(true)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  users        User[]
+  cases        Case[]
+  appointments Appointment[]
+}
+
+// ============================================================
+// CLIENTS, PARTIES, COMPANIES, PROPERTIES
+// ============================================================
+
+model Client {
+  id                          String                @id @default(cuid())
+  internalId                  String                @unique // CLIENT-YYYY-NNNNNN (kept as-is — this IS the clientCode)
+  clientType                  ClientType
+  capacity                    String? // buyer, seller, owner, tenant, etc.
+  fullNameEn                  String
+  fullNameAr                  String?
+  nationality                 String?
+  dateOfBirth                 String?
+  emiratesId                  String?               @unique // Phase 16 — unique constraint for duplicate prevention
+  passportNumber              String?               @unique // Phase 16 — unique constraint for duplicate prevention
+  passportExpiry              DateTime? // Phase 16 — passport expiry tracking
+  mobile                      String? // legacy phone field (kept for backward compat)
+  phoneE164                   String? // Phase 16 — canonical E.164 phone (backfilled from mobile)
+  email                       String?
+  address                     String?
+  preferredLanguage           String                @default("en")
+  dataConsent                 Boolean               @default(false)
+  commConsent                 Boolean               @default(false)
+  // Phase 7b.2 — PDPL consent tracking
+  consentPrivacyPolicyAt      DateTime?
+  consentPrivacyPolicyVersion String?
+  consentMarketingAt          DateTime?
+  consentCommunicationsAt     DateTime?
+  consentWithdrawnAt          DateTime?
+  company                     Company?
+  representative              ClientRepresentative?
+  createdAt                   DateTime              @default(now())
+  updatedAt                   DateTime              @updatedAt
+  // Phase 16 — lifecycle + audit
+  status                      String                @default("active") // active | inactive | blacklisted | deceased
+  statusChangedAt             DateTime?
+  statusChangedBy             String?
+  statusReason                String?
+  lastActivityAt              DateTime?
+  // Phase 16 — back-relations for new models
+  clientAuditLog              ClientAuditLog[]
+  clientDocuments             ClientDocument[]
+  cases                       Case[]
+  caseParties                 CaseParty[]
+  documents                   Document[]
+  comments                    Comment[]
+  notifications               Notification[]
+  agreements                  Agreement[]
+  // Phase 7b.2 — back-relations
+  consentRecords              ConsentRecord[]
+  dataSubjectRequests         DataSubjectRequest[]
+
+  @@index([fullNameEn])
+  @@index([phoneE164])
+  @@index([emiratesId])
+  @@index([passportNumber])
+  @@index([status])
+}
+
+// Phase 16 — Client-level audit log for every create/update/status change.
+// Records old → new value, actor, reason. Immutable.
+model ClientAuditLog {
+  id        String   @id @default(cuid())
+  clientId  String
+  client    Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  action    String // created | updated | status_changed | document_uploaded | viewed
+  field     String?
+  oldValue  String?
+  newValue  String?
+  actorId   String
+  actorRole String
+  reason    String?
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  @@index([clientId, createdAt])
+  @@index([actorId, createdAt])
+}
+
+// Phase 16 — Client-scoped document vault (separate from the Case-level Document model).
+// Stores identity docs (EID, passport, trade licence, POA) at the client level
+// so they're reusable across multiple cases.
+model ClientDocument {
+  id                 String    @id @default(cuid())
+  clientId           String
+  client             Client    @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  documentType       String // emirates_id | passport | trade_license | poa | other
+  filePath           String
+  fileName           String
+  fileSize           Int
+  mimeType           String
+  checksum           String
+  verificationStatus String    @default("pending") // pending | verified | rejected | expired
+  verifiedBy         String?
+  verifiedAt         DateTime?
+  expiresAt          DateTime?
+  uploadedBy         String
+  uploadedAt         DateTime  @default(now())
+
+  @@index([clientId, documentType])
+}
+
+model Company {
+  id                  String  @id @default(cuid())
+  clientId            String  @unique
+  client              Client  @relation(fields: [clientId], references: [id])
+  legalName           String
+  licenseNumber       String?
+  licenseExpiry       String?
+  jurisdiction        String?
+  authorizedSignatory String?
+  beneficialOwner     String?
+  tradeLicenseUrl     String?
+}
+
+model ClientRepresentative {
+  id            String  @id @default(cuid())
+  clientId      String  @unique
+  client        Client  @relation(fields: [clientId], references: [id])
+  repType       String // poa, board-resolution, etc.
+  repName       String
+  repIdNumber   String?
+  poaNumber     String?
+  poaIssueDate  String?
+  poaExpiryDate String?
+  poaScope      String?
+}
+
+model Property {
+  id              String  @id @default(cuid())
+  caseId          String
+  case            Case    @relation(fields: [caseId], references: [id])
+  propertyType    String?
+  unitNumber      String?
+  buildingName    String?
+  project         String?
+  community       String?
+  area            String?
+  titleDeedNumber String?
+  plotNumber      String?
+  ownershipType   String?
+  propertyStatus  String?
+}
+
+model CaseParty {
+  id       String  @id @default(cuid())
+  caseId   String
+  case     Case    @relation(fields: [caseId], references: [id])
+  clientId String?
+  client   Client? @relation(fields: [clientId], references: [id])
+  role     String // buyer, seller, mortgagor, mortgagee, developer, etc.
+  name     String
+  idNumber String?
+  contact  String?
+}
+
+// ============================================================
+// SERVICE CATALOG & REQUIREMENTS
+// ============================================================
+
+model ServiceCatalogItem {
+  id                      String   @id @default(cuid())
+  internalCode            String   @unique
+  serviceName             String
+  serviceNameAr           String?
+  dldCategory             String
+  description             String?
+  descriptionAr           String?
+  applicableClientTypes   String // JSON string array
+  applicablePropertyTypes String // JSON string array
+  requiredParties         String // JSON string array
+  mandatoryDocuments      String // JSON string array of doc-type keys
+  optionalDocuments       String // JSON string array
+  conditionalDocuments    String // JSON string array
+  validationNotes         String?
+  appointmentRequired     Boolean  @default(false)
+  estimatedSlaHours       Int      @default(48)
+  approvalLevel           String   @default("manager")
+  feeNotes                String?
+  notificationsConfig     String? // JSON
+  exceptionRules          String?
+  internalChecklist       String? // JSON
+  // Phase 4 — auto-create fee templates. JSON array of:
+  //   [{ feeType, description, defaultAmountFils, vatApplicable, isMandatory,
+  //      gateStage: "before_delegation"|"before_dld_submission"|"before_completion"|null,
+  //      autoCreateOnCaseOpen: boolean }]
+  feeTemplates            String? // JSON
+  dldReferenceLink        String?
+  effectiveDate           String?
+  reviewDate              String?
+  version                 Int      @default(1)
+  active                  Boolean  @default(true)
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+  cases                   Case[]
+
+  // RT Workflow — Part 7 / Issue 1: explicit FK to ProcedureCatalog.
+  // Replaces the brittle string-matching lookup in transition() that tried
+  // ServiceCatalogItem.internalCode → ProcedureCatalog.code → legacyObjectcode.
+  // Now a single indexed lookup: Case → Service → ProcedureCatalog.
+  // Populated once by scripts/migrate-service-to-catalog.ts.
+  // Part 7: tightened to non-nullable after the backfill script reported
+  // 0 unmapped services. Future services MUST have this FK set at creation time
+  // (the ServiceCatalogItem POST handler should resolve it from internalCode).
+  procedureCatalogId      String
+  procedureCatalog        ProcedureCatalog? @relation(fields: [procedureCatalogId], references: [id])
+}
+
+// ============================================================
+// CASE / SERVICE REQUEST
+// ============================================================
+
+model Case {
+  id                   String             @id @default(cuid())
+  caseRef              String             @unique
+  clientId             String
+  client               Client             @relation(fields: [clientId], references: [id])
+  serviceId            String
+  service              ServiceCatalogItem @relation(fields: [serviceId], references: [id])
+  branchId             String?
+  branch               Branch?            @relation(fields: [branchId], references: [id])
+  receptionAdminId     String?
+  receptionAdmin       User?              @relation("ReceptionCases", fields: [receptionAdminId], references: [id])
+  trusteeOfficerId     String?
+  trusteeOfficer       User?              @relation("OfficerCases", fields: [trusteeOfficerId], references: [id])
+  trusteeManagerId     String?
+  trusteeManager       User?              @relation("ManagerCases", fields: [trusteeManagerId], references: [id])
+  status               CaseStatus         @default(DRAFT)
+  priority             Priority           @default(NORMAL)
+  serviceCategory      String?
+  requiresAppointment  Boolean            @default(false)
+  appointmentDateTime  String?
+  internalNotes        String?
+  nextAction           String?
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+  submittedAt          DateTime?
+  readyForManagerAt    DateTime?
+  approvedAt           DateTime?
+  closedAt             DateTime?
+  slaDueAt             DateTime?
+  // Phase 3 — Reception Handover & Delegation Workflow
+  delegationMode       String?            @default("full") // "full" (all docs collected) | "partial" (some mandatory docs missing, reception delegated anyway) | "re_delegated" (returned by officer, re-delegated by reception)
+  handoverCompletedAt  DateTime? // when reception completed the handover checklist
+  lastReturnReason     String? // denormalized most recent return reason for fast display in lists
+  returnedAt           DateTime? // most recent time the case was returned to reception
+  reDelegatedAt        DateTime? // most recent time reception re-delegated a returned case
+  // Phase 7b.2 — Legal hold (excludes case from retention enforcement)
+  legalHold            Boolean            @default(false)
+  legalHoldReason      String?
+  legalHoldSetById     String?
+  legalHoldSetBy       User?              @relation("LegalHoldSetBy", fields: [legalHoldSetById], references: [id])
+  legalHoldSetAt       DateTime?
+  legalHoldClearedById String?
+  legalHoldClearedAt   DateTime?
+  archivedAt           DateTime? // set when retention job archives this case
+
+  parties           CaseParty[]
+  properties        Property[]
+  documents         Document[]
+  checklistItems    DocumentChecklistItem[]
+  appointments      Appointment[]
+  notifications     Notification[]
+  tasks             Task[]
+  approvals         Approval[]
+  exceptions        ExceptionRequest[]
+  agreements        Agreement[]
+  dldRecords        DldManualRecord[]
+  auditLogs         AuditLog[]
+  comments          Comment[]
+  statusHistory     StatusHistory[]
+  handoverChecklist ReceptionHandoverChecklist?
+  returnNotes       ReturnNote[]
+  delegationEvents  DelegationEvent[]
+  // Phase 4 — fee ledger
+  fees              FeeLine[]
+  feeReceipts       FeeReceipt[]
+  // Phase 5 — DLD processing + client communications
+  dldSubmission     DldSubmission?
+  clientMessages    ClientMessage[]
+  // Phase 6 — AI extractions
+  aiExtractions     AiExtraction[]
+  // Phase 7a — Real-time collaboration
+  editLocks         CaseEditLock[]
+  fieldVersions     CaseFieldVersion[]
+  conflicts         FieldConflict[]
+  invoices          Invoice[]
+  // Phase 15.2 — Agent referral attribution. Set when a lead is converted to a case.
+  referredByAgentId String?
+
+  // Phase 17.6 — Case Preservation & Dormant Management
+  // Tracks cases that have stalled for one of 7 known reasons. The scheduler
+  // (17.6.2) auto-sets stallReason when conditions are met. The escalation
+  // ladder (17.6.3) bumps escalationLevel as time passes.
+  stallReason              String?   // client_unresponsive | documents_expired | dld_pending | other_party_unresponsive | officer_unavailable | payment_pending | legal_dispute | null
+  // RT Workflow state (Phase A) — tracks the procedure's position in the state machine
+  // Values: draft | pending_smart_app | requires_modification | not_received | received | completed | cancelled | rejected
+  // Set by transition() in src/lib/workflow/rt/transition.ts — never set directly by other code
+  // Part 7 / Issue 2: tightened to non-nullable with @default("draft") after the
+  // backfill script (scripts/backfill-case-workflow-state.ts) reported 0 nulls.
+  workflowState            String   @default("draft")
+  stallSince               DateTime?
+  stallNote                String?
+  lastClientContactAt      DateTime?
+  lastOfficerActionAt      DateTime?
+  nextFollowUpAt           DateTime?
+  escalationLevel          Int       @default(0)  // 0=none, 1=reminder, 2=manager, 3=formal
+  formalAbandonmentAt      DateTime?
+  formalAbandonmentReason  String?
+
+  // Other-party contact tracking (for "other_party_unresponsive" stall reason)
+  sellerLastContactAt      DateTime?
+  buyerLastContactAt       DateTime?
+  bankLastContactAt        DateTime?
+  developerLastContactAt   DateTime?
+
+  stallEvents              CaseStallEvent[]
+
+  // Part 8B — preparation sheet back-relation
+  preparationSheets        PreparationSheet[]
+}
+
+// Phase 17.6 — Case Preservation & Dormant Management
+// Append-only audit trail of stall state transitions. Each row captures a
+// transition: detected (stall first noticed), escalated (escalationLevel
+// bumped), resumed (activity detected, stall cleared), or abandoned (formal
+// abandonment flow completed). Used by Manager Review Queue (17.6.6) and
+// Analytics KPIs (17.6.10).
+model CaseStallEvent {
+  id               String   @id @default(cuid())
+  caseRef          String
+  case             Case     @relation(fields: [caseRef], references: [caseRef], onDelete: Cascade)
+  fromReason       String?  // previous stallReason (null on first detection)
+  toReason         String?  // new stallReason (null on resume/abandon)
+  escalationLevel  Int      // escalationLevel at time of event
+  action           String   // detected | escalated | resumed | abandoned
+  actorId          String?  // userId (null for system/scheduler)
+  reason           String?  // free-text reason (required on abandoned)
+  createdAt        DateTime @default(now())
+
+  @@index([caseRef, createdAt])
+}
+
+// ============================================================
+// PHASE 3 — RECEPTION HANDOVER CHECKLIST
+// ============================================================
+// Pre-delegation gate that Reception must complete before submitting a case
+// to a Trustee Officer. Stored as a single row per case with a JSON-structured
+// items array so it can be reconfigured without schema migrations.
+
+model ReceptionHandoverChecklist {
+  id                    String   @id @default(cuid())
+  caseId                String   @unique
+  case                  Case     @relation(fields: [caseId], references: [id])
+  // JSON array of { key, label, labelAr, category (mandatory|optional), completed (bool), note (string), completedById, completedAt }
+  items                 String   @default("[]")
+  allMandatoryCompleted Boolean  @default(false)
+  completedById         String?
+  completedBy           User?    @relation(fields: [completedById], references: [id])
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@index([caseId])
+}
+
+// ============================================================
+// PHASE 3 — RETURN NOTE (Officer → Reception structured corrections)
+// ============================================================
+// When a Trustee Officer returns a case to Reception (for missing documents,
+// incorrect party info, wrong service selection, etc.), they create a
+// structured ReturnNote describing exactly what needs fixing. The note
+// captures the missing-item keys, free-text correction instructions, and
+// the target Reception admin. The case status moves to RETURNED_FOR_CORRECTION.
+
+model ReturnNote {
+  id                     String       @id @default(cuid())
+  caseId                 String
+  case                   Case         @relation(fields: [caseId], references: [id])
+  returnedById           String
+  returnedBy             User         @relation("ReturnNoteReturnedBy", fields: [returnedById], references: [id])
+  targetReceptionAdminId String?
+  targetReceptionAdmin   User?        @relation("ReturnNoteTarget", fields: [targetReceptionAdminId], references: [id])
+  // Phase 3.1 — formal 8-status enum replaces the generic category string
+  returnStatus           ReturnStatus
+  reason                 String // free-text from officer
+  // JSON array of missing item keys (docType keys or checklist item ids)
+  missingItemKeys        String?
+  // JSON array of correction instructions [{ field, problem, action }]
+  correctionList         String?
+  priority               String       @default("normal") // "low" | "normal" | "high" | "urgent"
+  resolvedAt             DateTime? // when reception re-delegates the case
+  resolvedById           String?
+  resolvedBy             User?        @relation("ReturnNoteResolvedBy", fields: [resolvedById], references: [id])
+  resolutionNote         String?
+  createdAt              DateTime     @default(now())
+
+  @@index([caseId])
+  @@index([targetReceptionAdminId])
+}
+
+// Phase 3.1 — immutable, append-only log of every delegation / return / re-delegation
+// event on a case. One row per handoff, never edited or deleted. This is the
+// compliance-grade handoff audit trail that supplements the generic AuditLog
+// with structured handoff-specific fields.
+model DelegationEvent {
+  id                  String        @id @default(cuid())
+  caseId              String
+  case                Case          @relation(fields: [caseId], references: [id])
+  eventType           String // "delegation" | "partial_delegation" | "return" | "re_delegation"
+  fromUserId          String?
+  fromUser            User?         @relation("DelegationEventsFrom", fields: [fromUserId], references: [id])
+  fromRole            String? // role snapshot at time of event
+  toUserId            String?
+  toUser              User?         @relation("DelegationEventsTo", fields: [toUserId], references: [id])
+  toRole              String?
+  delegatedAt         DateTime      @default(now())
+  // Event-specific fields (nullable depending on eventType)
+  missingDocuments    String? // JSON array of doc keys (for partial_delegation)
+  returnStatus        ReturnStatus? // 8-status enum value (for return events)
+  rejectedDocumentIds String? // JSON array of document ids that the officer rejected (for return events)
+  changeSummary       String? // JSON for re_delegations: { newDocs, replacedDocs, statusChanges, receptionNotes, previousReturnNote }
+  reason              String? // free-text reason provided with the event
+  resolutionNote      String? // for re_delegations: the reception resolution note
+  // Snapshot of case state at time of event (for compliance)
+  caseStatusBefore    String?
+  caseStatusAfter     String?
+  ipAddress           String?
+  userAgent           String?
+  createdAt           DateTime      @default(now())
+
+  @@index([caseId])
+  @@index([eventType])
+  @@index([delegatedAt])
+}
+
+enum ReturnStatus {
+  returned_missing_documents
+  returned_incorrect_documents
+  returned_additional_information
+  returned_dld_requirement
+  returned_payment_required
+  returned_client_attendance
+  returned_manager_review
+  returned_other
+}
+
+model DocumentChecklistItem {
+  id                          String          @id @default(cuid())
+  caseId                      String
+  case                        Case            @relation(fields: [caseId], references: [id])
+  docKey                      String
+  docName                     String
+  docNameAr                   String?
+  category                    String // mandatory, optional, conditional
+  status                      ChecklistStatus @default(NOT_REQUESTED)
+  sortOrder                   Int             @default(0)
+  reason                      String?
+  comments                    String?
+  conditionallyAcceptedReason String?
+  updatedAt                   DateTime        @updatedAt
+}
+
+model StatusHistory {
+  id            String      @id @default(cuid())
+  caseId        String
+  case          Case        @relation(fields: [caseId], references: [id])
+  fromStatus    CaseStatus?
+  toStatus      CaseStatus
+  changedById   String?
+  changedByName String?
+  reason        String?
+  createdAt     DateTime    @default(now())
+}
+
+// ============================================================
+// DOCUMENTS
+// ============================================================
+
+model Document {
+  id                 String                @id @default(cuid())
+  // Phase 13 — caseId is now nullable so that Ejari-only documents (no regular Case
+  // parent) can be stored in the same Document register table. ejariCaseId is the
+  // optional FK to EjariCase — exactly one of caseId / ejariCaseId is set per row.
+  caseId             String?
+  case               Case?                 @relation(fields: [caseId], references: [id])
+  ejariCaseId        String?
+  ejariCase          EjariCase?            @relation(fields: [ejariCaseId], references: [id])
+  clientId           String?
+  client             Client?               @relation(fields: [clientId], references: [id])
+  partyId            String?
+  docType            String
+  docName            String
+  fileName           String
+  filePath           String
+  fileSize           Int
+  mimeType           String
+  classification     String                @default("Confidential")
+  issueDate          String?
+  expiryDate         String?
+  version            Int                   @default(1)
+  isCurrentVersion   Boolean               @default(true)
+  previousVersionId  String?
+  uploadedById       String?
+  uploadedBy         User?                 @relation(fields: [uploadedById], references: [id])
+  verifiedById       String?
+  verifiedBy         User?                 @relation("VerifiedDocs", fields: [verifiedById], references: [id])
+  verificationStatus DocVerificationStatus @default(PENDING)
+  verificationDate   DateTime?
+  comments           String?
+  watermark          Boolean               @default(true)
+  // Phase 2 — Document Register fields
+  clientCode         String? // denormalized Client.internalId for fast path building
+  caseNumber         String? // denormalized Case.caseRef
+  serviceType        String? // denormalized Service.internalCode
+  documentCategory   String? // Identity / Property / POA / Payment / DLD_Submission / DLD_Approved / Agreements / Communications / Internal
+  checklistItemId    String? // links to DocumentChecklistItem.id
+  partyName          String?
+  partyRole          String? // Seller / Buyer / Heir / Representative etc.
+  replacementReason  String? // required when version > 1
+  checksum           String? // SHA-256 file integrity hash
+  aiExtractionId     String? // links to AI extraction record (Phase 6)
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+
+  versionHistory DocumentVersionHistory[]
+  // Phase 6 — AI extractions
+  aiExtractions  AiExtraction[]
+}
+
+// Immutable log of every version of every document. Append-only — never updated or deleted.
+model DocumentVersionHistory {
+  id                 String   @id @default(cuid())
+  documentRegisterId String // references Document.id (the latest version)
+  document           Document @relation(fields: [documentRegisterId], references: [id])
+  version            Int // version number captured at this history row
+  fileName           String
+  filePath           String
+  fileSize           Int?
+  mimeType           String?
+  checksum           String?
+  uploadedById       String?
+  uploadedAt         DateTime
+  replacedByVersion  Int? // which version superseded this one (null if current)
+  replacementReason  String? // reason provided when this version was replaced
+  createdAt          DateTime @default(now())
+
+  @@index([documentRegisterId])
+  @@index([version])
+}
+
+// ============================================================
+// APPOINTMENTS
+// ============================================================
+
+model Appointment {
+  id            String   @id @default(cuid())
+  caseId        String?
+  case          Case?    @relation(fields: [caseId], references: [id])
+  clientId      String?
+  branchId      String?
+  branch        Branch?  @relation(fields: [branchId], references: [id])
+  officerId     String?
+  officer       User?    @relation(fields: [officerId], references: [id])
+  type          String
+  dateTime      String
+  duration      Int      @default(30)
+  attendees     String?
+  requiredDocs  String?
+  bookingRef    String   @unique
+  checkInStatus String   @default("pending")
+  tokenNumber   String?
+  notes         String?
+  cancelReason  String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+// ============================================================
+// NOTIFICATIONS
+// ============================================================
+
+model Notification {
+  id               String              @id @default(cuid())
+  caseId           String?
+  case             Case?               @relation(fields: [caseId], references: [id])
+  clientId         String?
+  client           Client?             @relation(fields: [clientId], references: [id])
+  templateId       String?
+  templateName     String
+  recipientName    String
+  recipientContact String?
+  channel          NotificationChannel
+  subject          String
+  body             String
+  attachments      String? // JSON array
+  sentById         String?
+  sentBy           User?               @relation(fields: [sentById], references: [id])
+  status           NotificationStatus  @default(DRAFT)
+  queuedAt         DateTime?
+  sentAt           DateTime?
+  deliveredAt      DateTime?
+  readAt           DateTime?
+  followUpDueAt    DateTime?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+}
+
+model NotificationTemplate {
+  id        String              @id @default(cuid())
+  name      String
+  code      String              @unique
+  subjectEn String
+  subjectAr String?
+  bodyEn    String
+  bodyAr    String?
+  channel   NotificationChannel @default(EMAIL)
+  active    Boolean             @default(true)
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+}
+
+// ============================================================
+// TASKS & COMMENTS
+// ============================================================
+
+model Task {
+  id           String    @id @default(cuid())
+  caseId       String?
+  case         Case?     @relation(fields: [caseId], references: [id])
+  assignedToId String?
+  assignedTo   User?     @relation(fields: [assignedToId], references: [id])
+  title        String
+  description  String?
+  dueAt        DateTime?
+  completedAt  DateTime?
+  status       String    @default("open")
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+model Comment {
+  id        String   @id @default(cuid())
+  caseId    String
+  case      Case     @relation(fields: [caseId], references: [id])
+  clientId  String?
+  client    Client?  @relation(fields: [clientId], references: [id])
+  authorId  String?
+  author    User?    @relation(fields: [authorId], references: [id])
+  body      String
+  internal  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ============================================================
+// APPROVALS & EXCEPTIONS
+// ============================================================
+
+model Approval {
+  id             String         @id @default(cuid())
+  caseId         String
+  case           Case           @relation(fields: [caseId], references: [id])
+  approverId     String
+  approver       User           @relation(fields: [approverId], references: [id])
+  action         ApprovalAction
+  reason         String?
+  previousStatus CaseStatus
+  newStatus      CaseStatus
+  attachments    String? // JSON
+  createdAt      DateTime       @default(now())
+}
+
+model ExceptionRequest {
+  id            String    @id @default(cuid())
+  caseId        String
+  case          Case      @relation(fields: [caseId], references: [id])
+  category      String
+  reason        String
+  evidence      String?
+  requestedById String?
+  reviewedById  String?
+  reviewer      User?     @relation("ExceptionReviewer", fields: [reviewedById], references: [id])
+  status        String    @default("pending") // pending, approved, rejected
+  reviewReason  String?
+  createdAt     DateTime  @default(now())
+  reviewedAt    DateTime?
+}
+
+// ============================================================
+// AGREEMENTS
+// ============================================================
+
+model AgreementTemplate {
+  id           String      @id @default(cuid())
+  name         String
+  nameAr       String?
+  bodyEn       String
+  bodyAr       String?
+  validityDays Int         @default(90)
+  disclaimer   String?
+  active       Boolean     @default(true)
+  version      Int         @default(1)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  agreements   Agreement[]
+}
+
+model Agreement {
+  id                  String            @id @default(cuid())
+  caseId              String?
+  case                Case?             @relation(fields: [caseId], references: [id])
+  clientId            String
+  client              Client            @relation(fields: [clientId], references: [id])
+  templateId          String
+  template            AgreementTemplate @relation(fields: [templateId], references: [id])
+  services            String?
+  validityStart       DateTime
+  validityEnd         DateTime
+  status              AgreementStatus   @default(PENDING)
+  clientSignedAt      DateTime?
+  witnessId           String?
+  witness             User?             @relation("WitnessedAgreements", fields: [witnessId], references: [id])
+  pdfPath             String?
+  clientDeclineReason String?
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+}
+
+// ============================================================
+// DLD MANUAL PROCESSING RECORD
+// ============================================================
+
+model DldManualRecord {
+  id                String   @id @default(cuid())
+  caseId            String
+  case              Case     @relation(fields: [caseId], references: [id])
+  officialRef       String?
+  submissionDate    String?
+  processingOutcome String?
+  receiptPath       String?
+  notes             String?
+  recordedById      String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+// ============================================================
+// PHASE 5 — DLD PROCESSING RECORD (structured)
+// ============================================================
+// This is a *record* module, not an *integration* module. The Trustee Officer
+// records what they did in the external DLD system (Dubai REST App / DLD portal).
+// This platform does NOT auto-submit to DLD. Every DLD action is a manual entry
+// with an audit trail.
+
+model DldSubmission {
+  id         String @id @default(cuid())
+  caseId     String @unique
+  case       Case   @relation(fields: [caseId], references: [id])
+  caseNumber String // denormalized Case.caseRef
+  clientCode String
+
+  // Submission identity
+  dldServiceName      String? // e.g. "Property Sale Registration"
+  dldTransactionRef   String? // DLD's own transaction/reference number
+  submissionDate      DateTime?
+  processingOfficerId String? // Trustee Officer who submitted
+  processingOfficer   User?     @relation("DldSubmissionsByOfficer", fields: [processingOfficerId], references: [id])
+  attemptCount        Int       @default(0)
+
+  // DLD payment (separate from Phase 4 fee ledger — this is DLD's own payment)
+  dldPaymentLink      String?
+  dldFeeAmountFils    Int? // DLD fee amount in fils
+  dldPaymentStatus    DldPaymentStatus @default(not_required)
+  dldPaymentReference String?
+  dldPaymentDate      DateTime?
+
+  // Outcome
+  status                  DldStatus @default(not_submitted)
+  approvalDate            DateTime?
+  rejectionDate           DateTime?
+  rejectionReason         String?
+  additionalDocsRequested String? // JSON array of doc types
+  nextRequiredAction      String?
+  completionDate          DateTime?
+  finalNotes              String?
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  createdBy     String
+  createdById   String?
+  updatedBy     String?
+  updatedById   String?
+  updatedByUser User?    @relation("DldSubmissionsUpdatedBy", fields: [updatedById], references: [id])
+
+  // Timeline of status changes (immutable)
+  statusHistory DldStatusHistory[]
+
+  @@index([caseNumber])
+  @@index([status])
+  @@index([dldTransactionRef])
+}
+
+model DldStatusHistory {
+  id              String        @id @default(cuid())
+  submissionId    String
+  submission      DldSubmission @relation(fields: [submissionId], references: [id])
+  fromStatus      DldStatus?
+  toStatus        DldStatus
+  reason          String?
+  changedByUserId String
+  changedBy       User          @relation("DldStatusHistoryChangedBy", fields: [changedByUserId], references: [id])
+  changedAt       DateTime      @default(now())
+
+  @@index([submissionId, changedAt])
+}
+
+// Client communication log — one row per outbound message
+model ClientMessage {
+  id         String @id @default(cuid())
+  caseId     String
+  case       Case   @relation(fields: [caseId], references: [id])
+  caseNumber String
+  clientCode String
+
+  channel          MessageChannel // whatsapp | email | sms | secure_link | print
+  templateKey      String? // e.g. 'dld_approved', 'additional_docs_required'
+  subject          String?
+  body             String
+  recipientName    String?
+  recipientAddress String // phone / email / link URL
+
+  // Status
+  status        MessageStatus @default(draft)
+  sentAt        DateTime?
+  deliveredAt   DateTime?
+  readAt        DateTime?
+  failureReason String?
+  providerRef   String? // stub adapter's fake ref
+
+  // Attachment / link
+  secureLinkToken   String? // opaque token for client portal
+  secureLinkExpires DateTime?
+  attachmentDocIds  String? // JSON array of document_register ids
+
+  // Reply / client response
+  clientResponseAt   DateTime?
+  clientResponseText String?
+
+  triggeredByStatus String? // DLD status that triggered this message
+  createdBy         String
+  createdById       String?
+  createdByUser     User?    @relation("ClientMessagesCreatedBy", fields: [createdById], references: [id])
+  createdAt         DateTime @default(now())
+
+  @@index([caseId, createdAt])
+  @@index([channel, status])
+}
+
+// Notification templates (admin-configurable)
+model MessageTemplate {
+  id        String         @id @default(cuid())
+  key       String         @unique // e.g. 'dld_approved'
+  name      String
+  channel   MessageChannel
+  subjectEn String?
+  subjectAr String?
+  bodyEn    String
+  bodyAr    String
+  variables String // JSON array of allowed {{var}} names
+  isActive  Boolean        @default(true)
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+}
+
+enum DldStatus {
+  not_submitted
+  ready_for_submission
+  submitted_to_dld
+  dld_payment_required
+  dld_under_review
+  dld_additional_documents_required
+  dld_approved
+  dld_rejected
+  dld_cancelled
+  dld_completed
+}
+
+enum DldPaymentStatus {
+  not_required
+  pending
+  paid
+  refunded
+  cancelled
+}
+
+enum MessageChannel {
+  whatsapp
+  email
+  sms
+  secure_link
+  print
+}
+
+enum MessageStatus {
+  draft
+  queued
+  sent
+  delivered
+  read
+  failed
+  bounced
+}
+
+// ============================================================
+// PHASE 6 — AI DOCUMENT INTELLIGENCE & DATA EXTRACTION
+// ============================================================
+// Assistive AI: extracts, classifies, summarizes, compares, and flags.
+// NEVER approves, NEVER marks legal validity, NEVER submits to DLD.
+// Every AI output carries source document + confidence + model version +
+// human-verification status.
+
+model AiExtraction {
+  id                 String   @id @default(cuid())
+  documentRegisterId String // FK to Document.id (which version was analyzed)
+  document           Document @relation(fields: [documentRegisterId], references: [id])
+  documentVersion    Int
+  caseId             String
+  case               Case     @relation(fields: [caseId], references: [id])
+  caseNumber         String
+  clientCode         String
+
+  // Run metadata
+  providerKey       String // 'tesseract' | 'google_vision' | 'aws_textract' | 'azure_di' | 'stub'
+  providerVersion   String
+  modelVersion      String?
+  templateId        String? // FK to AiExtractionTemplate
+  template          AiExtractionTemplate? @relation(fields: [templateId], references: [id])
+  triggeredByUserId String
+  triggeredBy       User                  @relation("AiExtractionsTriggeredBy", fields: [triggeredByUserId], references: [id])
+  triggeredAt       DateTime              @default(now())
+  completedAt       DateTime?
+  durationMs        Int?
+  status            AiRunStatus           @default(queued)
+
+  // Raw OCR output (stored as .txt sidecar file, NOT inline in DB)
+  rawTextStoragePath String?
+  rawTextLength      Int?
+  pageCount          Int?
+  detectedLanguages  String? // JSON array: ["ar","en"]
+
+  // Classification
+  classifiedDocumentType   String?
+  classificationConfidence Float?
+  classificationSource     String? // 'rules' | 'model' | 'manual_override'
+
+  // Results summary
+  overallConfidence        Float?
+  fieldsExtractedCount     Int     @default(0)
+  fieldsLowConfidenceCount Int     @default(0)
+  flagsSummary             String? // JSON array of flag objects
+
+  // Human review gate
+  humanReviewStatus AiHumanReviewStatus @default(pending)
+  reviewedByUserId  String?
+  reviewedBy        User?               @relation("AiExtractionsReviewedBy", fields: [reviewedByUserId], references: [id])
+  reviewedAt        DateTime?
+  reviewerNotes     String?
+
+  failureReason String?
+
+  fields    AiExtractedField[]
+  flags_rel AiFlag[]
+
+  @@index([caseId, status])
+  @@index([documentRegisterId, documentVersion])
+}
+
+model AiExtractedField {
+  id           String       @id @default(cuid())
+  extractionId String
+  extraction   AiExtraction @relation(fields: [extractionId], references: [id])
+
+  fieldKey          String // e.g. 'emirates_id_number'
+  fieldLabelEn      String
+  fieldLabelAr      String
+  extractedValue    String?
+  normalizedValue   String?
+  dataType          String // 'text' | 'date' | 'number' | 'id' | 'phone' | 'email' | 'amount' | 'boolean' | 'long_text'
+  confidence        Float // 0–1
+  sourcePage        Int?
+  sourceBoundingBox String?
+  sourceSnippet     String?
+
+  // Validation
+  validationStatus  String? // 'ok' | 'format_invalid' | 'expired' | 'missing' | 'mismatch'
+  validationMessage String?
+
+  // Human decision
+  humanDecision       FieldDecision @default(pending)
+  humanCorrectedValue String?
+  humanDecidedBy      String?
+  humanDecidedAt      DateTime?
+  humanNotes          String?
+
+  // Mapping to internal case field + DLD field
+  mapsToCaseField String?
+  mapsToDldField  String?
+
+  @@index([extractionId])
+  @@index([humanDecision])
+}
+
+model AiFlag {
+  id              String       @id @default(cuid())
+  extractionId    String
+  extraction      AiExtraction @relation(fields: [extractionId], references: [id])
+  flagType        String // 'missing_page' | 'low_quality' | 'expired' | 'name_mismatch' | 'id_mismatch' | 'unit_mismatch' | 'ambiguous_authority' | 'unreadable_region' | 'translation_missing'
+  severity        String // 'info' | 'warning' | 'critical'
+  messageEn       String
+  messageAr       String
+  relatedFieldKey String?
+  acknowledgedBy  String?
+  acknowledgedAt  DateTime?
+  resolutionNote  String?
+
+  @@index([extractionId, severity])
+}
+
+model AiExtractionTemplate {
+  id              String   @id @default(cuid())
+  documentTypeKey String // matches classifiedDocumentType
+  name            String
+  description     String?
+  fields          String // JSON: array of { fieldKey, labelEn, labelAr, dataType, required, validationRule, mapsToCaseField, mapsToDldField, confidenceThreshold }
+  requiredFields  String // JSON array of fieldKeys
+  crossDocChecks  String?
+  defaultProvider String?
+  isActive        Boolean  @default(true)
+  version         Int      @default(1)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  createdBy       String
+
+  extractions AiExtraction[]
+
+  @@unique([documentTypeKey, version])
+  @@index([documentTypeKey, isActive])
+}
+
+enum AiRunStatus {
+  queued
+  running
+  completed
+  failed
+  cancelled
+}
+
+enum AiHumanReviewStatus {
+  pending
+  in_review
+  accepted
+  rejected
+  partial
+}
+
+enum FieldDecision {
+  pending
+  accepted
+  corrected
+  rejected
+}
+
+// ============================================================
+// PAYMENT / RECEIPT (internal tracking only)
+// ============================================================
+
+model PaymentReceipt {
+  id            String   @id @default(cuid())
+  caseId        String
+  amount        Float
+  currency      String   @default("AED")
+  method        String?
+  receiptNumber String?
+  receiptPath   String?
+  notes         String?
+  createdAt     DateTime @default(now())
+}
+
+// ============================================================
+// PHASE 7a — REAL-TIME COLLABORATION & SERVICE WORKFLOW BUILDER
+// ============================================================
+
+model CaseEditLock {
+  id           String    @id @default(cuid())
+  caseId       String
+  case         Case      @relation(fields: [caseId], references: [id])
+  caseNumber   String
+  section      String
+  heldByUserId String
+  heldBy       User      @relation("CaseEditLocksHeldBy", fields: [heldByUserId], references: [id])
+  acquiredAt   DateTime  @default(now())
+  expiresAt    DateTime
+  releasedAt   DateTime?
+
+  @@index([caseId, section, releasedAt])
+}
+
+model CaseFieldVersion {
+  id             String   @id @default(cuid())
+  caseId         String
+  case           Case     @relation(fields: [caseId], references: [id])
+  caseNumber     String
+  fieldPath      String
+  currentVersion Int      @default(1)
+  lastValue      String?
+  lastUpdatedBy  String?
+  lastUpdatedAt  DateTime @updatedAt
+
+  @@unique([caseId, fieldPath])
+}
+
+model FieldConflict {
+  id          String    @id @default(cuid())
+  caseId      String
+  case        Case      @relation(fields: [caseId], references: [id])
+  caseNumber  String
+  fieldPath   String
+  userAId     String
+  userAValue  String
+  userBId     String
+  userBValue  String
+  detectedAt  DateTime  @default(now())
+  resolvedAt  DateTime?
+  resolvedBy  String?
+  resolution  String?
+  mergedValue String?
+
+  @@index([caseId, resolvedAt])
+}
+
+model ServiceWorkflow {
+  id            String                   @id @default(cuid())
+  serviceKey    String                   @unique
+  serviceNameEn String
+  serviceNameAr String?
+  description   String?
+  version       Int                      @default(1)
+  isActive      Boolean                  @default(true)
+  definition    String
+  schemaVersion Int                      @default(1)
+  createdAt     DateTime                 @default(now())
+  updatedAt     DateTime                 @updatedAt
+  createdBy     String
+  updatedBy     String?
+  versions      ServiceWorkflowVersion[]
+
+  @@index([serviceKey, isActive])
+}
+
+model ServiceWorkflowVersion {
+  id            String          @id @default(cuid())
+  workflowId    String
+  workflow      ServiceWorkflow @relation(fields: [workflowId], references: [id])
+  version       Int
+  definition    String
+  changeSummary String?
+  createdBy     String
+  createdAt     DateTime        @default(now())
+
+  @@unique([workflowId, version])
+}
+
+// ============================================================
+// PHASE 4 — FEE MANAGEMENT & PAYMENT TRACKING
+// ============================================================
+// All amounts are stored as integer fils (1 AED = 100 fils). No floats in the
+// money path. DLD-side fees are flagged isDldPassthrough=true and labelled in
+// the UI as "Collected by DLD — recorded here for reference only".
+
+model FeeLine {
+  id               String           @id @default(cuid())
+  caseId           String
+  case             Case             @relation(fields: [caseId], references: [id])
+  caseNumber       String // denormalized Case.caseRef for fast queries
+  clientCode       String // denormalized Client.internalId
+  feeType          FeeType
+  description      String
+  isDldPassthrough Boolean          @default(false)
+  quotedAmountFils Int // quoted amount in fils (before VAT/discount/waiver)
+  vatApplicable    Boolean          @default(false)
+  vatPercent       Float            @default(5.0)
+  discountFils     Int              @default(0)
+  waiverFils       Int              @default(0)
+  waiverReason     String?
+  netDueFils       Int // quoted + VAT - discount - waiver (cached, recomputed on write)
+  paidFils         Int              @default(0)
+  refundedFils     Int              @default(0)
+  outstandingFils  Int // netDue - paid - refunded (cached)
+  isMandatory      Boolean          @default(true)
+  gateStage        GateStage?
+  stageRecorded    String // when in the lifecycle it was created (case_open | before_delegation | ad_hoc | etc.)
+  status           FeeStatus        @default(quoted)
+  currency         String           @default("AED")
+  createdBy        String
+  createdById      String?
+  createdByUser    User?            @relation("FeeLinesCreatedBy", fields: [createdById], references: [id])
+  updatedById      String?
+  updatedBy        User?            @relation("FeeLinesUpdatedBy", fields: [updatedById], references: [id])
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  notes            String?
+  receipts         FeeReceipt[]
+  history          FeeLineHistory[]
+
+  @@index([caseId])
+  @@index([caseNumber])
+  @@index([status])
+  @@index([caseNumber, gateStage, isMandatory])
+  @@index([isDldPassthrough])
+}
+
+// ============================================================
+// PART 9.5 — FEE CATALOG (DLD + Trustee fee schedule as data)
+// ============================================================
+// Replaces inline fee formulas in preparation-sheet templates. Each fee
+// code is a row; the calculateFees service reads from this table.
+//
+// Fee types:
+//   - 'fixed':       fixedAmount applies
+//   - 'percentage':  baseField * percentageRate, with optional percentageFloor
+//   - 'tiered':      if base >= tierThreshold use tierAmountAbove else tierAmountBelow
+//
+// baseField values: 'saleValue' | 'propertyValue' | 'mortgageAmount' |
+//                   'rentalValue' | 'amendedValueChange' | 'portfolioLoanAmount'
+//
+// appliesToProcedures: JSON array of procedure IDs, or ['*'] for all
+// dropWhen:             JSON { field, equals } — skip this fee if context field matches
+// mutualExclusionGroup: only one fee per group survives (e.g. DUBAI_MUNI_MAP vs NON_DUBAI_MAP)
+// perProperty:         multiply by propertyCount (used for portfolio title deeds)
+// ============================================================
+
+model FeeCatalog {
+  id                    String   @id @default(cuid())
+  code                  String   @unique // e.g. DLD_REGISTRATION_SALE, TRUSTEE_FEE_SALE
+  nameEn                String
+  nameAr                String
+  feeType               String   // 'fixed' | 'percentage' | 'tiered'
+  feeCategory           String   // 'government' | 'trustee'
+  isActive              Boolean  @default(true)
+
+  // For feeType = 'fixed'
+  fixedAmount           Int?     // amount in fils (1 AED = 100 fils)
+
+  // For feeType = 'percentage'
+  percentageRate        Float?   // e.g. 0.04 = 4%, 0.00125 = 0.125%
+  percentageFloor       Int?     // minimum amount in fils (e.g. 200000 = AED 2,000)
+  baseField             String?  // which FeeContext field to apply percentage to
+
+  // For feeType = 'tiered'
+  tierThreshold         Int?     // threshold in fils
+  tierAmountAbove       Int?     // amount if base >= threshold
+  tierAmountBelow       Int?     // amount if base < threshold
+
+  // VAT
+  vatApplicable         Boolean  @default(false)
+  vatRate               Float    @default(0.05)
+
+  // Application rules
+  appliesToProcedures   String   // JSON array: ["SALE-001", ...] or ["*"]
+  dropWhen              String?  // JSON { field, equals } — conditional skip
+  mutualExclusionGroup  String?  // e.g. 'map_fee' — only one per group survives
+
+  // Per-property multiplier (portfolio title deeds)
+  perProperty           Boolean  @default(false)
+
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@index([feeCategory, isActive])
+  @@index([isActive])
+}
+
+model FeeReceipt {
+  id                   String        @id @default(cuid())
+  receiptNumber        String        @unique // RCPT-YYYY-NNNNNN
+  feeLineId            String
+  feeLine              FeeLine       @relation(fields: [feeLineId], references: [id])
+  caseId               String
+  case                 Case          @relation(fields: [caseId], references: [id])
+  caseNumber           String
+  amountFils           Int // positive = payment, negative = refund
+  paymentMethod        PaymentMethod
+  paymentReference     String?
+  chequeNumber         String?
+  paidAt               DateTime
+  collectedByUserId    String
+  collectedBy          User          @relation("FeeReceiptsCollectedBy", fields: [collectedByUserId], references: [id])
+  receivedConfirmedBy  String?
+  attachmentDocumentId String? // links to Document.id (receipt scan/screenshot/bank slip)
+  isRefund             Boolean       @default(false)
+  refundOfReceiptId    String? // FK to original receipt when isRefund=true
+  refundReason         String?
+  status               ReceiptStatus @default(confirmed)
+  verifiedBy           String?
+  verifiedById         String?
+  verifiedByUser       User?         @relation("FeeReceiptsVerifiedBy", fields: [verifiedById], references: [id])
+  verifiedAt           DateTime?
+  notes                String?
+  createdBy            String
+  createdById          String?
+  createdByUser        User?         @relation("FeeReceiptsCreatedBy", fields: [createdById], references: [id])
+  createdAt            DateTime      @default(now())
+
+  // Phase 14 — Payment Gateway + Accountant Verification fields.
+  // gatewayReferenceId holds the Stripe session id / Checkout.com pay id / POS receipt id / virtual IBAN ref.
+  // settlementStatus tracks the funds' journey from initiated → confirmed_by_accounts (or bounced/refunded).
+  // reconciliationFlags is a JSON snapshot of the accountant's verification checks.
+  paymentMethodExtended String? // cash | credit_card_pos | payment_link | bank_transfer | virtual_iban | apple_pay | uae_pay
+  gatewayReferenceId    String?
+  settlementStatus      String    @default("initiated") // initiated | pending_bank_clearance | confirmed | bounced | refunded
+  invoiceId             String? // link to Phase 14 Invoice (split payments: multiple receipts share invoiceId)
+  invoice               Invoice?  @relation(fields: [invoiceId], references: [id])
+  confirmedByAccountant String?
+  confirmedAt           DateTime?
+  bankClearingReference String?
+  internalLedgerCode    String?
+  reconciliationFlags   String? // JSON: { amountMatches: bool, sourceCleared: bool }
+
+  @@index([feeLineId, paidAt])
+  @@index([caseNumber, paidAt])
+  @@index([collectedByUserId])
+  @@index([invoiceId])
+  @@index([gatewayReferenceId])
+}
+
+// Append-only fee-line history (mirrors document_version_history pattern).
+// Every status change, payment, refund, waiver, cancellation = one row.
+model FeeLineHistory {
+  id          String   @id @default(cuid())
+  feeLineId   String
+  feeLine     FeeLine  @relation(fields: [feeLineId], references: [id])
+  eventType   String // created | updated | status_changed | payment_recorded | refund_recorded | waived | cancelled | discount_applied
+  oldValue    String? // JSON snapshot of relevant fields before change
+  newValue    String? // JSON snapshot after change
+  reason      String?
+  actorUserId String
+  actor       User     @relation("FeeLineHistoryActor", fields: [actorUserId], references: [id])
+  createdAt   DateTime @default(now())
+
+  @@index([feeLineId, createdAt])
+}
+
+// Atomic receipt sequence per year. Locked inside a prisma.$transaction so
+// two concurrent receipts never collide on the same number.
+model ReceiptSequence {
+  year      Int @id
+  lastValue Int
+}
+
+enum FeeType {
+  trustee_fee
+  vat
+  typing
+  translation
+  courier
+  dld_passthrough
+  other
+}
+
+enum GateStage {
+  before_delegation
+  before_dld_submission
+  before_completion
+}
+
+enum FeeStatus {
+  not_required
+  quoted
+  pending_payment
+  partially_paid
+  paid
+  payment_verification_required
+  refunded
+  waived
+  cancelled
+}
+
+enum PaymentMethod {
+  cash
+  card
+  bank_transfer
+  online
+  cheque
+  other
+}
+
+enum ReceiptStatus {
+  pending_verification
+  confirmed
+  reversed
+}
+
+// ============================================================
+// AUDIT LOG (immutable)
+// ============================================================
+
+model AuditLog {
+  id            String   @id @default(cuid())
+  caseId        String?
+  case          Case?    @relation(fields: [caseId], references: [id])
+  userId        String?
+  user          User?    @relation(fields: [userId], references: [id])
+  action        String
+  entity        String?
+  entityId      String?
+  details       String?
+  ipAddress     String?
+  userAgent     String?
+  previousValue String?
+  newValue      String?
+  hash          String? // tamper-evident hash chain
+  createdAt     DateTime @default(now())
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum UserRole {
+  RECEPTION_ADMIN
+  TRUSTEE_OFFICER
+  TRUSTEE_MANAGER
+  CLIENT
+  ADMIN
+  ACCOUNTANT
+  AGENT
+}
+
+enum ClientType {
+  INDIVIDUAL
+  NON_RESIDENT_INDIVIDUAL
+  COMPANY
+  AUTHORIZED_REPRESENTATIVE
+  ATTORNEY
+  OTHER
+}
+
+enum CaseStatus {
+  DRAFT
+  NEW_INTAKE_COMPLETED
+  AWAITING_CLIENT_DOCUMENTS
+  DOCUMENTS_UPLOADED
+  UNDER_OFFICER_REVIEW
+  RETURNED_FOR_CORRECTION
+  AWAITING_CLIENT_APPOINTMENT
+  READY_FOR_MANAGER_REVIEW
+  MANAGER_APPROVED_READY_FOR_DLD
+  REJECTED_ON_HOLD
+  SUBMITTED_TO_DLD_MANUALLY
+  DLD_PROCESSING_IN_PROGRESS
+  COMPLETED
+  CLOSED
+  CANCELLED
+  ARCHIVED
+  // Phase 14 — Accountant Workflow states. Gates Officer access.
+  AWAITING_PAYMENT
+  ACCOUNTS_LOCKED
+  REJECTED_TO_DESK_BY_ACCOUNTS
+}
+
+enum Priority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum ChecklistStatus {
+  NOT_REQUESTED
+  REQUESTED
+  UPLOADED
+  UNDER_REVIEW
+  VERIFIED
+  MISSING
+  REJECTED
+  EXPIRED
+  UNREADABLE
+  NOT_APPLICABLE
+  CONDITIONAL_ACCEPTANCE
+}
+
+enum DocVerificationStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+  EXPIRED
+  UNREADABLE
+  NOT_APPLICABLE
+  CONDITIONAL
+}
+
+enum NotificationChannel {
+  IN_APP
+  EMAIL
+  SMS
+  WHATSAPP
+  PDF_LETTER
+  CLIENT_PORTAL
+}
+
+enum NotificationStatus {
+  DRAFT
+  QUEUED
+  SENT
+  DELIVERED
+  FAILED
+  CANCELLED
+  READ
+}
+
+enum ApprovalAction {
+  APPROVE
+  REJECT
+  RETURN
+  ESCALATE
+  HOLD
+  OVERRIDE
+}
+
+enum AgreementStatus {
+  PENDING
+  SENT
+  ACCEPTED
+  DECLINED
+  EXPIRED
+  SIGNED
+}
+
+// ============================================================
+// PHASE 7b.2 — PDPL COMPLIANCE, RETENTION, ANALYTICS
+// ============================================================
+// All compliance content (privacy policy text, consent wording, retention
+// periods, DSR templates) is a TEMPLATE that must be reviewed by a UAE-
+// qualified legal adviser before production use.
+
+enum DsrType {
+  ACCESS
+  RECTIFICATION
+  ERASURE
+  PORTABILITY
+  OBJECTION
+  RESTRICTION
+}
+
+enum DsrStatus {
+  SUBMITTED
+  IN_REVIEW
+  AWAITING_INFO
+  FULFILLED
+  REJECTED
+  WITHDRAWN
+}
+
+enum RetentionAction {
+  ARCHIVE
+  ANONYMIZE
+  DELETE
+}
+
+enum RetentionCategory {
+  CASE
+  DOCUMENT
+  COMMUNICATION
+  AI_EXTRACTION
+  AUDIT_LOG
+  NOTIFICATION
+}
+
+model ConsentRecord {
+  id                      String    @id @default(cuid())
+  clientId                String
+  client                  Client    @relation(fields: [clientId], references: [id])
+  privacyPolicyVersion    String?
+  consentPrivacyPolicyAt  DateTime?
+  consentMarketingAt      DateTime?
+  consentCommunicationsAt DateTime?
+  consentWithdrawnAt      DateTime?
+  capturedBy              String?
+  capturedAt              DateTime  @default(now())
+  notes                   String?
+
+  @@index([clientId, capturedAt])
+}
+
+model PrivacyPolicyVersion {
+  id               String    @id @default(cuid())
+  version          String    @unique // e.g. "v2"
+  bodyEn           String // markdown
+  bodyAr           String? // markdown
+  effectiveDate    DateTime
+  summaryOfChanges String?
+  published        Boolean   @default(false)
+  publishedAt      DateTime?
+  createdBy        String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([published, effectiveDate])
+}
+
+model DataSubjectRequest {
+  id               String    @id @default(cuid())
+  clientId         String
+  client           Client    @relation(fields: [clientId], references: [id])
+  type             DsrType
+  status           DsrStatus @default(SUBMITTED)
+  submittedAt      DateTime  @default(now())
+  assignedToId     String?
+  assignedTo       User?     @relation("DsrAssignedTo", fields: [assignedToId], references: [id])
+  completedAt      DateTime?
+  responseNotes    String?
+  attachments      String? // JSON array of attachment paths
+  bundlePath       String? // generated bundle path (for access requests)
+  lastReminderAt   DateTime?
+  reminderSentAt   DateTime?
+  escalationSentAt DateTime?
+  rejectionReason  String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([clientId, status, submittedAt])
+  @@index([status, submittedAt])
+}
+
+model DpoContact {
+  id            String   @id @default(cuid())
+  name          String
+  email         String
+  phone         String?
+  postalAddress String?
+  notes         String?
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model CrossBorderTransfer {
+  id                 String   @id @default(cuid())
+  dataCategory       String // e.g. "Client PII", "Document images"
+  destinationCountry String
+  legalBasis         String // e.g. "Standard Contractual Clauses (SCCs)"
+  purpose            String?
+  recordedById       String?
+  recordedBy         User?    @relation("CrossBorderRecordedBy", fields: [recordedById], references: [id])
+  recordedAt         DateTime @default(now())
+  notes              String?
+
+  @@index([recordedAt])
+}
+
+model DataProcessingAgreement {
+  id                  String    @id @default(cuid())
+  supplierName        String
+  dataCategories      String // JSON array
+  purpose             String?
+  retentionPeriodDays Int?
+  signatureStatus     String    @default("pending") // pending, signed, declined
+  signedAt            DateTime?
+  signedBy            String?
+  notes               String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+}
+
+model RetentionRule {
+  id                  String            @id @default(cuid())
+  category            RetentionCategory @unique
+  retentionPeriodDays Int
+  action              RetentionAction
+  legalHoldExempt     Boolean           @default(false)
+  notes               String?
+  updatedAt           DateTime          @updatedAt
+  updatedBy           String?
+}
+
+model RetentionJobLog {
+  id                   String            @id @default(cuid())
+  runStartedAt         DateTime          @default(now())
+  runCompletedAt       DateTime?
+  category             RetentionCategory
+  rowsProcessed        Int               @default(0)
+  rowsArchived         Int               @default(0)
+  rowsAnonymized       Int               @default(0)
+  rowsDeleted          Int               @default(0)
+  rowsSkippedLegalHold Int               @default(0)
+  errors               String? // JSON array
+  triggeredBy          String?
+
+  @@index([runStartedAt])
+  @@index([category, runStartedAt])
+}
+
+model ArchivedCase {
+  id            String    @id @default(cuid())
+  caseId        String    @unique
+  caseRef       String
+  caseJson      String // full case snapshot (JSON)
+  archivedAt    DateTime  @default(now())
+  archivedBy    String?
+  reason        String?
+  restoredAt    DateTime?
+  restoredBy    String?
+  restoreReason String?
+
+  @@index([archivedAt])
+}
+
+model SystemLog {
+  id         String   @id @default(cuid())
+  timestamp  DateTime @default(now())
+  level      String // info, warn, error
+  event      String
+  userId     String?
+  caseNumber String?
+  action     String?
+  durationMs Int?
+  outcome    String?
+  details    String? // JSON
+
+  @@index([level, timestamp])
+  @@index([timestamp])
+  @@index([event, timestamp])
+}
+
+// Phase 7c — Server-side pre-flight checklist persistence.
+// Stores who checked each manual item + when. Governance artifact for auditors.
+model PreflightCheck {
+  id          String    @id @default(cuid())
+  itemKey     String    @unique // 'legal-privacy' | 'legal-retention' | ...
+  checked     Boolean   @default(false)
+  checkedById String?
+  checkedBy   User?     @relation("PreflightCheckedBy", fields: [checkedById], references: [id])
+  checkedAt   DateTime?
+  notes       String?
+  updatedAt   DateTime  @updatedAt
+}
+
+// ============================================================
+// PHASE 8 — WHATSAPP CRM FOUNDATION
+// Official Meta WhatsApp Cloud API only. No personal accounts.
+// ============================================================
+
+model WaContact {
+  id                String            @id @default(cuid())
+  clientCode        String?           @unique
+  fullName          String
+  arabicFullName    String?
+  mobileE164        String            @unique
+  whatsappNumber    String?
+  email             String?
+  preferredLanguage String            @default("en")
+  contactType       String            @default("individual")
+  consentStatus     String            @default("not_requested")
+  marketingConsent  String            @default("not_requested")
+  assignedReception String?
+  assignedOfficer   String?
+  source            String?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+  conversations     WaConversation[]
+  consents          WaConsentRecord[]
+
+  @@index([mobileE164])
+  @@index([clientCode])
+}
+
+model WaConversation {
+  id                     String              @id @default(cuid())
+  channel                String              @default("whatsapp")
+  externalConversationId String?
+  contactId              String
+  contact                WaContact           @relation(fields: [contactId], references: [id])
+  caseNumber             String?
+  assignedUserId         String?
+  assignedTeamId         String?
+  status                 String              @default("open")
+  priority               String              @default("normal")
+  lastMessageAt          DateTime?
+  firstResponseAt        DateTime?
+  resolvedAt             DateTime?
+  // Phase 11 Extension C — Live chat takeover: when Reception opens + types, set true
+  // to pause AI. processAiMessage returns early with { skipped: true, reason: 'human_active' }
+  aiPaused               Boolean             @default(false)
+  aiPausedAt             DateTime?
+  aiPausedBy             String?
+  createdAt              DateTime            @default(now())
+  updatedAt              DateTime            @updatedAt
+  messages               WaMessage[]
+  aiRuns                 AiConversationRun[]
+  aiSuggestedReplies     AiSuggestedReply[]
+  aiEscalations          AiEscalation[]
+  aiReviewQueueItems     AiReviewQueueItem[]
+
+  @@index([contactId, status])
+  @@index([caseNumber])
+  @@index([assignedUserId, status])
+  @@index([aiPaused])
+}
+
+model WaMessage {
+  id                String         @id @default(cuid())
+  conversationId    String
+  conversation      WaConversation @relation(fields: [conversationId], references: [id])
+  externalMessageId String?        @unique
+  direction         String
+  messageType       String
+  content           String
+  templateName      String?
+  templateLanguage  String?
+  sentByUserId      String?
+  deliveryStatus    String         @default("sent")
+  deliveredAt       DateTime?
+  readAt            DateTime?
+  failedAt          DateTime?
+  failureReason     String?
+  consentRecordId   String?
+  sentAt            DateTime       @default(now())
+  createdAt         DateTime       @default(now())
+
+  @@index([conversationId, sentAt])
+  @@index([externalMessageId])
+}
+
+model WaConsentRecord {
+  id                 String    @id @default(cuid())
+  contactId          String
+  contact            WaContact @relation(fields: [contactId], references: [id])
+  channel            String    @default("whatsapp")
+  purpose            String
+  status             String
+  consentTextVersion String
+  consentSource      String
+  capturedByUserId   String?
+  capturedAt         DateTime  @default(now())
+  withdrawnAt        DateTime?
+  withdrawalReason   String?
+
+  @@index([contactId, purpose, status])
+}
+
+model WaTemplate {
+  id              String   @id @default(cuid())
+  name            String   @unique
+  category        String
+  language        String
+  bodyEn          String
+  bodyAr          String?
+  variables       String
+  metaStatus      String   @default("pending")
+  isActive        Boolean  @default(true)
+  // Phase 12 — Interactive WhatsApp buttons
+  interactiveType String   @default("none") // none | buttons | list
+  buttonsJson     String? // JSON: [{id, title}]
+  listJson        String? // JSON: {buttonText, sections}
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+// ============================================================
+// PHASE 9 — WHATSAPP CRM OPERATIONS
+// Secure upload links, automation workflows, appointment booking,
+// routing engine, template approval lifecycle.
+// ============================================================
+
+model SecureLink {
+  id              String             @id @default(cuid())
+  token           String             @unique
+  caseNumber      String?
+  contactId       String?
+  checklistItemId String?
+  purpose         String
+  expiresAt       DateTime
+  isRevoked       Boolean            @default(false)
+  revokedAt       DateTime?
+  revokedBy       String?
+  maxUses         Int                @default(1)
+  usedCount       Int                @default(0)
+  createdBy       String
+  createdAt       DateTime           @default(now())
+  accessedAt      DateTime?
+  accessedFrom    String?
+  uploads         SecureLinkUpload[]
+
+  @@index([caseNumber])
+  @@index([contactId])
+  @@index([expiresAt, isRevoked])
+}
+
+model SecureLinkUpload {
+  id              String     @id @default(cuid())
+  secureLinkId    String
+  secureLink      SecureLink @relation(fields: [secureLinkId], references: [id])
+  fileName        String
+  fileSize        Int
+  mimeType        String
+  documentId      String?
+  uploadedAt      DateTime   @default(now())
+  processedAt     DateTime?
+  virusScanStatus String     @default("pending")
+
+  @@index([secureLinkId])
+}
+
+model WaAutomationRule {
+  id          String                  @id @default(cuid())
+  name        String
+  trigger     String
+  priority    Int                     @default(100)
+  isActive    Boolean                 @default(true)
+  conditions  String
+  actions     String
+  description String?
+  createdAt   DateTime                @default(now())
+  updatedAt   DateTime                @updatedAt
+  executions  WaAutomationExecution[]
+}
+
+model WaAutomationExecution {
+  id             String           @id @default(cuid())
+  ruleId         String
+  rule           WaAutomationRule @relation(fields: [ruleId], references: [id])
+  conversationId String?
+  caseNumber     String?
+  triggerContext String
+  actionsRun     String
+  status         String
+  errorMessage   String?
+  executedAt     DateTime         @default(now())
+
+  @@index([ruleId, executedAt])
+  @@index([conversationId])
+}
+
+model WaRoutingRule {
+  id             String   @id @default(cuid())
+  name           String
+  priority       Int      @default(100)
+  isActive       Boolean  @default(true)
+  conditions     String
+  assignedTeamId String?
+  assignedUserId String?
+  slaMinutes     Int?
+  escalateToRole String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+model AppointmentSlot {
+  id              String    @id @default(cuid())
+  date            DateTime
+  time            String
+  durationMinutes Int       @default(30)
+  serviceType     String
+  branchId        String?
+  isBooked        Boolean   @default(false)
+  bookedBy        String?
+  bookedAt        DateTime?
+  appointmentId   String?   @unique
+
+  @@index([date, isBooked])
+}
+
+model WaTemplateApproval {
+  id                String    @id @default(cuid())
+  templateId        String
+  metaSubmissionId  String?
+  metaStatus        String    @default("not_submitted")
+  submittedAt       DateTime?
+  submittedByUserId String?
+  approvedAt        DateTime?
+  rejectionReason   String?
+  approvedByUserId  String?
+  notes             String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([templateId])
+}
+
+// ============================================================
+// PHASE 10 — REPORTING & ANALYTICS
+// 12 dashboards + KPI dictionary + custom report builder +
+// scheduled reports + export center. Read-only reporting
+// queries must NOT run against the transactional DB during
+// business hours — dashboards read from ReportSnapshot cache
+// refreshed every 5 minutes by a scheduler.
+// ============================================================
+
+model ReportSnapshot {
+  id           String   @id @default(cuid())
+  snapshotType String // executive | operations | whatsapp | financial | service | audit | security | ai
+  periodStart  DateTime
+  periodEnd    DateTime
+  data         String // JSON blob with full dashboard data
+  computedAt   DateTime @default(now())
+  computedBy   String // 'scheduler' | userId
+
+  @@index([snapshotType, periodEnd])
+}
+
+model KpiDefinition {
+  id                 String    @id @default(cuid())
+  key                String    @unique
+  name               String
+  nameAr             String?
+  formula            String
+  numerator          String?
+  denominator        String?
+  dataSource         String
+  ownerRole          String
+  target             String?
+  warningThreshold   String?
+  criticalThreshold  String?
+  refreshFrequency   String // real_time | hourly | daily
+  exampleCalculation String?
+  // Phase 12 — canonical SQL for Metabase to use (no two dashboards compute differently)
+  metabaseSql        String?
+  approvedAt         DateTime?
+  approvedBy         String?
+  changeHistory      String // JSON array
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+}
+
+model ScheduledReport {
+  id            String    @id @default(cuid())
+  name          String
+  reportType    String
+  format        String // pdf | csv | xlsx
+  schedule      String // cron-like: daily@HH:MM | weekly@DOW@HH:MM | monthly@D@HH:MM
+  filters       String // JSON
+  recipients    String // JSON array of emails
+  isActive      Boolean   @default(true)
+  lastRunAt     DateTime?
+  nextRunAt     DateTime?
+  lastRunStatus String?
+  createdBy     String
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([nextRunAt, isActive])
+}
+
+model ReportExportLog {
+  id          String   @id @default(cuid())
+  reportId    String   @unique
+  reportType  String
+  format      String
+  filters     String // JSON
+  rowCount    Int
+  generatedBy String
+  generatedAt DateTime @default(now())
+  filePath    String?
+  watermark   String?
+  ipHash      String?
+
+  @@index([generatedBy, generatedAt])
+  @@index([reportType, generatedAt])
+}
+
+model ReportAccess {
+  id         String   @id @default(cuid())
+  role       String // RECEPTION_ADMIN | TRUSTEE_OFFICER | TRUSTEE_MANAGER | ADMIN
+  reportType String // executive | operations | whatsapp | financial | service | audit | security | ai
+  allowed    Boolean  @default(true)
+  rowScope   String // branch | team | own | all
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([role, reportType])
+}
+
+// ============================================================
+// PHASE 11 — AI SUPPORT AGENT & KNOWLEDGE BASE
+// Guardrails enforced in code (forbidden patterns block output).
+// 8 escalation triggers (legal/dld/doc/fee/complaint/sensitive/
+// human/low_confidence/case_in_review).
+// Provider fallback to internal works if external unavailable.
+// External AI off by default; toggle exists but stays off until
+// data-processing review. Staff approve every draft before send.
+// ============================================================
+
+model AiKnowledgeSource {
+  id             String    @id @default(cuid())
+  title          String
+  category       String // policy | procedure | checklist | dld_guidance | faq | fee_schedule | office_info
+  sourceOwner    String
+  effectiveDate  DateTime
+  reviewDate     DateTime
+  version        Int       @default(1)
+  approvalStatus String    @default("draft") // draft | pending | approved | archived
+  bodyEn         String
+  bodyAr         String?
+  citationRef    String?
+  accessLevel    String    @default("internal")
+  isActive       Boolean   @default(true)
+  createdBy      String
+  approvedBy     String?
+  approvedAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([category, approvalStatus])
+  @@index([isActive, approvalStatus])
+}
+
+model AiConversationRun {
+  id               String             @id @default(cuid())
+  conversationId   String
+  conversation     WaConversation     @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  messageId        String?
+  promptVersion    String
+  modelKey         String
+  modelVersion     String?
+  mode             String // internal | external | fallback
+  inputText        String
+  outputText       String?
+  confidence       Float?
+  sourcesUsed      String? // JSON
+  escalated        Boolean            @default(false)
+  escalationReason String?
+  blocked          Boolean            @default(false)
+  blockedReason    String?
+  latencyMs        Int?
+  tokenCount       Int?
+  costFils         Int?
+  aiDisclaimer     String
+  reviewedBy       String?
+  reviewedAt       DateTime?
+  reviewDecision   String? // approved | edited | rejected
+  reviewNotes      String?
+  createdAt        DateTime           @default(now())
+  // Phase 11 Part 2 — back-relations for include queries
+  suggestedReplies AiSuggestedReply[]
+  escalations      AiEscalation[]
+
+  @@index([conversationId, createdAt])
+  @@index([escalated, createdAt])
+  @@index([blocked, createdAt])
+}
+
+model AiSuggestedReply {
+  id              String            @id @default(cuid())
+  runId           String
+  run             AiConversationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  conversationId  String
+  conversation    WaConversation    @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  draftText       String
+  status          String            @default("pending") // pending | approved | edited | rejected
+  approvedBy      String?
+  approvedAt      DateTime?
+  finalText       String?
+  sentAt          DateTime?
+  sentMessageId   String?
+  rejectionReason String?
+  createdAt       DateTime          @default(now())
+
+  @@index([conversationId, status])
+  @@index([status, createdAt])
+  @@index([runId])
+}
+
+model AiEscalation {
+  id              String            @id @default(cuid())
+  runId           String
+  run             AiConversationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  conversationId  String
+  conversation    WaConversation    @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  triggerType     String
+  reason          String
+  priority        String            @default("normal")
+  assignedTo      String?
+  status          String            @default("open") // open | acknowledged | resolved
+  acknowledgedAt  DateTime?
+  resolvedAt      DateTime?
+  resolutionNotes String?
+  createdAt       DateTime          @default(now())
+
+  @@index([status, priority, createdAt])
+  @@index([conversationId])
+  @@index([runId])
+}
+
+model AiReviewQueueItem {
+  id             String         @id @default(cuid())
+  itemType       String // suggested_reply | escalation | low_confidence
+  itemId         String
+  conversationId String
+  conversation   WaConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  priority       String         @default("normal")
+  assignedTo     String?
+  status         String         @default("pending")
+  slaDueAt       DateTime?
+  createdAt      DateTime       @default(now())
+  resolvedAt     DateTime?
+
+  @@index([status, priority, createdAt])
+  @@index([assignedTo, status])
+}
+
+model AiPolicyRule {
+  id          String   @id @default(cuid())
+  name        String
+  ruleType    String // forbidden_phrase | forbidden_pattern | required_escalation | sensitive_data
+  pattern     String
+  action      String // block | warn | escalate | log
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model AiModelConfig {
+  id                  String    @id @default(cuid())
+  key                 String    @unique
+  displayName         String
+  mode                String // internal | external
+  provider            String
+  modelId             String?
+  endpoint            String?
+  apiKeySecretRef     String?
+  isEnabled           Boolean   @default(false)
+  isDefault           Boolean   @default(false)
+  costPer1kTokensFils Int       @default(0)
+  healthStatus        String    @default("unknown")
+  lastCheckedAt       DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+}
+
+model AiPromptVersion {
+  id          String   @id @default(cuid())
+  version     String   @unique
+  body        String
+  description String?
+  createdBy   String
+  createdAt   DateTime @default(now())
+  isActive    Boolean  @default(false)
+
+  @@index([isActive])
+}
+
+// Back-relation fields on WaConversation for live chat takeover
+// (added to model WaConversation via schema patch below)
+
+// ============================================================
+// PHASE 12 — ADVANCED BI, WHATSAPP ENHANCEMENTS, HARDENING, CRM
+// ============================================================
+
+// Workstream A — BI Integration
+model BiConnection {
+  id            String    @id @default(cuid())
+  provider      String    @default("metabase") // metabase | superset | powerbi
+  baseUrl       String?
+  healthStatus  String    @default("unknown") // unknown | ok | degraded | down
+  lastCheckedAt DateTime?
+  dashboardIds  String? // JSON: { executive, financial, operational, audit }
+  embedSecret   String? // JWT signing secret for embedding
+  isEnabled     Boolean   @default(false)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+// Workstream B — Interactive WhatsApp buttons (extend WaTemplate)
+// Added as new fields on WaTemplate via schema patch below
+
+// Workstream D — CRM Integration (Phase 12.2, schema added now for planning)
+model CrmIntegration {
+  id             String    @id @default(cuid())
+  provider       String    @unique // hubspot | salesforce
+  isEnabled      Boolean   @default(false)
+  credentialsRef String // env-var names (JSON)
+  fieldMappings  String // JSON
+  syncFrequency  String    @default("15_min")
+  lastSyncAt     DateTime?
+  healthStatus   String    @default("unknown")
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+}
+
+model SyncJob {
+  id            String    @id @default(cuid())
+  integrationId String
+  direction     String // outbound | inbound
+  entityType    String
+  entityId      String
+  status        String // success | partial | failed
+  responseBody  String?
+  errorMessage  String?
+  startedAt     DateTime  @default(now())
+  completedAt   DateTime?
+
+  @@index([integrationId, status])
+}
+
+model SyncError {
+  id           String    @id @default(cuid())
+  jobId        String
+  errorType    String
+  errorMessage String
+  payload      String?
+  resolvedAt   DateTime?
+  createdAt    DateTime  @default(now())
+}
+
+// ============================================================
+// PHASE 13 — EJARI / PROPERTY SERVICES PROCESS
+// Mode A (Manual): ships to production immediately.
+// Mode B (DLD API): code-complete, disabled by default.
+// ============================================================
+
+model EjariCase {
+  id          String  @id @default(cuid())
+  caseNumber  String  @unique
+  clientCode  String
+  contactId   String?
+  serviceType String // new_registration | renewal | amendment | cancellation
+  mode        String  @default("manual") // manual | dld_api
+
+  contractNumber     String?
+  propertyUnit       String?
+  propertyBuilding   String?
+  propertyArea       String?
+  landlordName       String?
+  landlordEmiratesId String?
+  tenantName         String?
+  tenantEmiratesId   String?
+  startDate          DateTime?
+  endDate            DateTime?
+  annualRentFils     Int?
+  paymentTerms       String?
+
+  status              String    @default("inquiry")
+  dldReference        String?
+  certificateUrl      String?
+  certificateIssuedAt DateTime?
+  rejectionReason     String?
+
+  appointmentRequired  Boolean   @default(false)
+  appointmentId        String?
+  trusteeAppointmentAt DateTime?
+
+  assignedReception String?
+  assignedOfficer   String?
+  createdBy         String
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  documents         EjariDocument[]
+  statusHistory     EjariStatusHistory[]
+  tenancyContract   TenancyContract?
+  // Phase 13 — back-relation for Document register rows directly attached to this
+  // Ejari case (no regular Case parent). Used by secure-link uploads.
+  registerDocuments Document[]
+
+  @@index([status, createdAt])
+  @@index([clientCode])
+  @@index([contactId])
+}
+
+model EjariDocument {
+  id                 String    @id @default(cuid())
+  ejariCaseId        String
+  ejariCase          EjariCase @relation(fields: [ejariCaseId], references: [id], onDelete: Cascade)
+  documentType       String
+  documentRegisterId String?
+  verificationStatus String    @default("pending") // pending | verified | rejected | expired | unreadable
+  verificationNotes  String?
+  verifiedBy         String?
+  verifiedAt         DateTime?
+  uploadedBy         String
+  uploadedAt         DateTime  @default(now())
+
+  @@index([ejariCaseId, verificationStatus])
+}
+
+model EjariStatusHistory {
+  id          String    @id @default(cuid())
+  ejariCaseId String
+  ejariCase   EjariCase @relation(fields: [ejariCaseId], references: [id], onDelete: Cascade)
+  fromStatus  String?
+  toStatus    String
+  reason      String?
+  actorId     String
+  actorRole   String
+  createdAt   DateTime  @default(now())
+
+  @@index([ejariCaseId, createdAt])
+}
+
+model TenancyContract {
+  id               String    @id @default(cuid())
+  ejariCaseId      String    @unique
+  ejariCase        EjariCase @relation(fields: [ejariCaseId], references: [id])
+  contractNumber   String?
+  signedAt         DateTime?
+  contractPdfPath  String?
+  contractHash     String?
+  attestedCopyPath String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+}
+
+model DldApiConfig {
+  id                String    @id @default(cuid())
+  environment       String    @unique // sandbox | production
+  baseUrl           String?
+  credentialsRef    String?
+  isEnabled         Boolean   @default(false)
+  lastHealthCheckAt DateTime?
+  healthStatus      String    @default("unknown")
+  rateLimitPerMin   Int       @default(60)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+}
+
+// ============================================================
+// PHASE 14 — PAYMENT GATEWAY + ACCOUNTANT WORKFLOW
+// ============================================================
+
+// Append-only sequence for invoice numbers: INV-YYYY-NNNNNN.
+model InvoiceSequence {
+  year      Int @id
+  lastValue Int
+}
+
+model Invoice {
+  id                   String    @id @default(cuid())
+  invoiceNumber        String    @unique // INV-YYYY-NNNNNN
+  caseNumber           String
+  case                 Case      @relation(fields: [caseNumber], references: [caseRef])
+  clientCode           String
+  transactionType      String // ready_sale | mortgage | gift | transfer | ejari
+  feeBreakdown         String // JSON: [{ label, amountFils, isVat, isDld, isTrusteeFee }]
+  totalAmountFils      Int
+  vatAmountFils        Int
+  paymentStatus        String    @default("unpaid")
+  // not_issued | unpaid | link_generated | awaiting_bank_clearing | confirmed_by_accounts | failed | refunded | voided
+  paymentMethod        String? // PaymentMethodExtended value (string)
+  paymentLink          String?
+  paymentLinkExpiresAt DateTime?
+  generatedBy          String
+  generatedAt          DateTime  @default(now())
+  voidedAt             DateTime?
+  voidedBy             String?
+  voidReason           String?
+  refundReference      String? // gateway refund reference
+  refundedAt           DateTime?
+  refundReason         String?
+
+  receipts                FeeReceipt[]
+  ledgerEntries           InvoiceLedgerEntry[]
+  accountantVerifications AccountantVerification[]
+  accountantNotifications AccountantNotification[]
+  refundApprovalTokens    RefundApprovalToken[]
+
+  @@index([caseNumber])
+  @@index([paymentStatus])
+}
+
+model InvoiceLedgerEntry {
+  id         String   @id @default(cuid())
+  invoiceId  String
+  invoice    Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  entryType  String // created | payment_received | confirmed_by_accounts | refund | void
+  amountFils Int
+  actorId    String
+  actorRole  String
+  reference  String?
+  notes      String?
+  createdAt  DateTime @default(now())
+
+  @@index([invoiceId, createdAt])
+}
+
+model AccountantVerification {
+  id                 String   @id @default(cuid())
+  receiptId          String   @unique
+  invoiceId          String?
+  invoice            Invoice? @relation(fields: [invoiceId], references: [id])
+  bankReference      String?
+  internalLedgerCode String?
+  amountMatches      Boolean  @default(false)
+  sourceCleared      Boolean  @default(false)
+  verifiedBy         String
+  verifiedAt         DateTime @default(now())
+  notes              String?
+  rejectionReason    String?
+
+  @@index([verifiedBy, verifiedAt])
+}
+
+model AccountantNotification {
+  id          String    @id @default(cuid())
+  type        String // payment_pending | payment_confirmed | payment_bounced | digest_summary | reception_alert
+  invoiceId   String?
+  invoice     Invoice?  @relation(fields: [invoiceId], references: [id])
+  receiptId   String?
+  priority    String    @default("normal") // low | normal | high | urgent
+  notes       String? // optional context — for reception_alert, the rejection reason text
+  isRead      Boolean   @default(false)
+  readAt      DateTime?
+  soundPlayed Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  expiresAt   DateTime?
+
+  @@index([isRead, createdAt])
+  @@index([type, isRead])
+}
+
+model EmailDigestLog {
+  id           String   @id @default(cuid())
+  digestType   String // accountant_morning | accountant_evening
+  recipients   String // JSON array of email addresses (no bank account numbers!)
+  itemCount    Int
+  sentAt       DateTime @default(now())
+  status       String // sent | failed | stubbed
+  errorMessage String?
+
+  @@index([sentAt])
+}
+
+// ============================================================
+// PHASE 14 CLOSE-OUT — Refund Manager approval tokens
+// ============================================================
+
+model RefundApprovalToken {
+  id         String    @id @default(cuid())
+  invoiceId  String // which invoice this approval applies to
+  invoice    Invoice   @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  amountFils Int // snapshot of amount at approval time
+  reason     String // the reason the accountant supplied when requesting
+  issuedBy   String // Manager user ID
+  issuedAt   DateTime  @default(now())
+  expiresAt  DateTime // 1 hour validity
+  usedAt     DateTime?
+  usedBy     String? // Accountant user ID who actually executed the refund
+  isRevoked  Boolean   @default(false)
+
+  @@index([invoiceId])
+  @@index([usedBy, usedAt])
+}
+
+// ============================================================
+// PHASE 15.1 — INTEGRATION HUB + MOCK API SERVER
+// ============================================================
+
+model IntegrationConfig {
+  id                String    @id @default(cuid())
+  key               String    @unique // 'stripe' | 'wio' | 'dld_api' | 'whatsapp_meta' | 'smtp' | 'metabase' | 'hubspot' | 'salesforce' | 'openai'
+  displayName       String
+  category          String // 'payment' | 'banking' | 'government' | 'messaging' | 'email' | 'bi' | 'crm' | 'ai'
+  mode              String    @default("stub") // 'stub' | 'sandbox' | 'production'
+  isEnabled         Boolean   @default(false)
+  endpointUrl       String?
+  credentialsRef    String? // JSON: env-var NAMES (never values)
+  configJson        String? // JSON: integration-specific config (rate limits, timeouts)
+  healthStatus      String    @default("unknown") // ok | degraded | down | unknown
+  lastHealthCheckAt DateTime?
+  lastHealthError   String?
+  rateLimitPerMin   Int       @default(60)
+  timeoutMs         Int       @default(30000)
+  retryPolicy       String    @default("exponential") // none | linear | exponential
+  retryMaxAttempts  Int       @default(3)
+  notes             String?
+  createdBy         String
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  healthHistory IntegrationHealthCheck[]
+  testRuns      IntegrationTestRun[]
+
+  @@index([category, isEnabled])
+}
+
+model IntegrationHealthCheck {
+  id              String            @id @default(cuid())
+  integrationId   String
+  integration     IntegrationConfig @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  status          String // ok | degraded | down
+  latencyMs       Int?
+  responseSnippet String?
+  checkedAt       DateTime          @default(now())
+
+  @@index([integrationId, checkedAt])
+}
+
+model IntegrationTestRun {
+  id              String            @id @default(cuid())
+  integrationId   String
+  integration     IntegrationConfig @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  testType        String // connection | auth | end_to_end
+  triggeredBy     String
+  status          String // success | partial | failed
+  requestPayload  String?
+  responsePayload String?
+  errorMessage    String?
+  latencyMs       Int?
+  startedAt       DateTime          @default(now())
+  completedAt     DateTime?
+
+  @@index([integrationId, startedAt])
+}
+
+model MockRequestLog {
+  id             String   @id @default(cuid())
+  integrationKey String // which mock was hit
+  method         String
+  path           String
+  requestBody    String?
+  responseBody   String?
+  statusCode     Int
+  receivedAt     DateTime @default(now())
+
+  @@index([integrationKey, receivedAt])
+}
+
+model MockFixture {
+  id             String   @id @default(cuid())
+  integrationKey String
+  path           String
+  method         String
+  responseBody   String // JSON
+  delayMs        Int      @default(0)
+  createdAt      DateTime @default(now())
+
+  @@unique([integrationKey, path, method])
+}
+
+// ============================================================
+// PHASE 15.2 — AGENT ROLE, AGENT PORTAL & COMMISSION ENGINE
+// ============================================================
+
+model Agent {
+  id                 String  @id @default(cuid())
+  agentCode          String  @unique // AGT-YYYY-NNNNNN
+  fullName           String
+  arabicFullName     String?
+  phoneE164          String  @unique
+  email              String  @unique
+  companyName        String?
+  tradeLicenseNumber String?
+  brokerRegistration String? // RERA/ORB number
+  contactType        String  @default("broker") // broker | property_manager | mortgage_consultant | developer | other
+  address            String?
+  preferredLanguage  String  @default("en")
+
+  // Commission agreement
+  commissionType      String // percentage | fixed | tiered
+  commissionRateBps   Int? // basis points (200 = 2%)
+  fixedFilsPerService String? // JSON: { "property_sale": 50000, "gift": 25000 }
+  tieredConfig        String? // JSON: tiers array
+  paymentTermsDays    Int     @default(30)
+  payoutMethod        String  @default("bank_transfer")
+  payoutDetails       String? // JSON: bank IBAN + account name (masked)
+
+  // Referral tracking
+  referralCode String  @unique
+  referralLink String
+  qrCodeUrl    String?
+
+  // Status
+  status                String    @default("pending") // pending | active | suspended | blacklisted
+  onboardingCompletedAt DateTime?
+  activatedAt           DateTime?
+  suspendedAt           DateTime?
+  suspendReason         String?
+  agreementSignedAt     DateTime?
+  agreementDocId        String?
+
+  // Login (for agent portal)
+  userId String? @unique // links to User with AGENT role
+
+  // Metrics
+  totalLeads             Int @default(0)
+  totalConverted         Int @default(0)
+  lifetimeCommissionFils Int @default(0)
+
+  createdBy String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  leads       AgentLead[]
+  commissions AgentCommission[]
+  payouts     AgentPayout[]
+  notes       AgentNote[]
+
+  @@index([status])
+  @@index([referralCode])
+}
+
+model AgentLead {
+  id              String  @id @default(cuid())
+  agentId         String
+  agent           Agent   @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  leadNumber      String  @unique // LEAD-YYYY-NNNNNN
+  clientName      String
+  clientPhone     String
+  clientEmail     String?
+  serviceInterest String
+  notes           String?
+  source          String // portal | whatsapp | link | qr | in_person
+
+  status String @default("new")
+  // new | contacted | qualified | converted | not_proceeding | lost | duplicate
+
+  // Conversion
+  convertedCaseNumber String?
+  convertedAt         DateTime?
+
+  // Attribution
+  attributionMethod String // first_touch | agent_confirmed | code_used | qr_scan
+  attributedAt      DateTime @default(now())
+  attributedBy      String?
+
+  assignedReception String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([agentId, status])
+  @@index([clientPhone])
+  @@index([status, createdAt])
+}
+
+model AgentCommission {
+  id          String  @id @default(cuid())
+  agentId     String
+  agent       Agent   @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  caseNumber  String
+  leadId      String?
+  serviceType String
+
+  // Commission calculation
+  baseAmountFils    Int // fee actually collected
+  commissionType    String // percentage | fixed | tiered
+  commissionRateBps Int? // snapshot
+  commissionFils    Int // computed amount
+
+  // Lifecycle
+  status String @default("accrued")
+  // accrued | pending_payout | paid | clawed_back | voided
+
+  accruedAt     DateTime     @default(now())
+  payableAt     DateTime? // after case completion + payment confirmed + cooling period
+  payoutBatchId String? // FK to AgentPayout
+  payout        AgentPayout? @relation(fields: [payoutBatchId], references: [id])
+  paidAt        DateTime?
+  paidReference String?
+
+  clawbackReason String?
+  voidedReason   String?
+
+  notes String?
+
+  @@index([agentId, status])
+  @@index([status, payableAt])
+  @@index([caseNumber])
+}
+
+model AgentPayout {
+  id          String @id @default(cuid())
+  batchNumber String @unique // PAYOUT-YYYY-MM-NNN
+  agentId     String
+  agent       Agent  @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  periodStart     DateTime
+  periodEnd       DateTime
+  commissionCount Int
+  totalFils       Int
+
+  status           String    @default("draft") // draft | pending_approval | approved | paid | failed
+  approvedBy       String?
+  approvedAt       DateTime?
+  paidAt           DateTime?
+  paymentReference String?
+  paymentMethod    String
+  failureReason    String?
+
+  statementPdfPath String?
+
+  createdBy String
+  createdAt DateTime @default(now())
+
+  commissions AgentCommission[]
+
+  @@index([agentId, status])
+}
+
+model AgentNote {
+  id        String   @id @default(cuid())
+  agentId   String
+  agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  noteType  String // internal | performance | compliance
+  body      String
+  authorId  String
+  createdAt DateTime @default(now())
+
+  @@index([agentId, createdAt])
+}
+
+// Add to Case: referredByAgentId (denormalized for fast lookup)
+// Prisma will auto-add the back-relation agentCommission AgentCommission? on Case
+
+// Phase 15.2 — append-only sequences for agent codes, lead numbers, payout batches
+model AgentSequence {
+  year      Int @id
+  lastValue Int
+}
+
+model AgentLeadSequence {
+  year      Int @id
+  lastValue Int
+}
+
+model AgentPayoutSequence {
+  year      Int
+  month     Int
+  lastValue Int
+
+  @@unique([year, month])
+}
+
+// ============================================================
+// PHASE 17.6 — STALL CONFIG (configurable thresholds)
+// ============================================================
+// Manager-configurable thresholds for the dormant case detection scheduler.
+// Each row is a JSON key-value store. If a key is missing, the scheduler
+// falls back to the default defined in src/lib/services/stall/defaults.ts.
+model StallConfig {
+  key         String   @id  // e.g. "officer_unavailable_days", "client_unresponsive_days"
+  value       Int              // threshold in days
+  updatedBy   String?
+  updatedAt   DateTime @default(now()) @updatedAt
+}
+
+// ============================================================
+// PHASE A — RT WORKFLOW (Confirmed State Machine)
+// ============================================================
+// 5 tables that encode the RT procedure workflow as data, not code.
+// Both the Next.js portal and the legacy ASP.NET system read from these.
+// Portal (PostgreSQL) is canonical — legacy (SQL Server) gets a read replica.
+// ============================================================
+
+// A1 — Procedure Catalog (single source of truth for all 110 procedures)
+// Pilot: 13 P1 procedures. P2/P3 land in a second seed batch.
+model ProcedureCatalog {
+  id                String   @id  // e.g. "SALE-001"
+  code              String   @unique  // e.g. "SALE_STANDARD"
+  legacyObjectcode  String?  // maps to ASP.NET view name (SELL_View, etc.)
+  category          String   // Sale, Grant, LeaseToOwn, Mortgage, Composite, Restriction
+  nameEn            String
+  nameAr            String
+  priority          String   // P1 | P2 | P3
+  complexity        String   // L | M | H
+  workspaceStates   String   @default("[]")  // JSON array of state codes from ProcedureWorkflowState
+  requiredDocs      String   @default("[]")  // JSON array of doc type keys
+  feeCodes          String   @default("[]")  // JSON array of fee code keys
+  isActive          Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @default(now()) @updatedAt
+
+  @@index([category, priority])
+  @@index([isActive])
+
+  // Back-relation from ServiceCatalogItem.procedureCatalog (Part 7 / Issue 1)
+  serviceMappings    ServiceCatalogItem[]
+
+  // Part 8B — preparation sheet templates for this procedure type
+  preparationSheetTemplates  PreparationSheetTemplate[]
+}
+
+// A2 — Workflow States (the state machine as data)
+// 8 states: draft, requires_modification, pending_smart_app, not_received, received, completed, cancelled, rejected
+model ProcedureWorkflowState {
+  id                String   @id  // ws-001 through ws-008
+  stateCode         String   @unique
+  stateNameEn       String
+  stateNameAr       String
+  workspaceSection  String   // matches ASP.NET .ascx control name
+  isTerminal        Boolean  @default(false)
+  allowedNext       String   @default("[]")  // JSON array of state codes
+  triggerEvent      String?  // Mixpanel event key that enters this state
+  icon              String?
+  displayOrder      Int
+
+  @@index([stateCode])
+}
+
+// A3 — Workflow Transitions (which button does what)
+// Encodes: from_state + to_state + trigger_type + trigger_id + role + mixpanel event
+model WorkflowTransition {
+  id              String   @id  // t-001 through t-012
+  fromState       String   // state code or "EXTERNAL" sentinel
+  toState         String   // state code
+  triggerType     String   // click | postback | system
+  triggerId       String?  // server control id suffix (btnSend, lnkSendBack, etc.)
+  mixpanelEvent   String?  // canonical event key from MixpanelEventMap
+  requiresRole    String?  // officer | auditor | system | reception | null (anyone)
+
+  @@index([fromState, toState])
+}
+
+// A4 — Mixpanel Event Map (canonical event keys ↔ transitions)
+model MixpanelEventMap {
+  key           String   @id  // snake_case canonical key
+  displayLabel  String
+  category      String   // rt_employee | auditor | lifecycle | system
+  firedFrom     String   // RT | TABU | both | system
+  transitions   String?  @default("[]")  // JSON array of WorkflowTransition.id
+}
+
+// A5 — Procedure Workflow History (append-only audit trail)
+// One row per state transition. Written atomically with the state update.
+model ProcedureWorkflowHistory {
+  id              String   @id @default(cuid())
+  procedureId     String   // maps to Case.id (or Case.caseRef for legacy compat)
+  fromState       String
+  toState         String
+  transitionId    String?  // FK to WorkflowTransition.id
+  actorUserId     String?  // null = system
+  occurredAt     DateTime @default(now())
+  reason          String?
+  mixpanelEvent   String?  // resolved from WorkflowTransition → MixpanelEventMap
+
+  @@index([procedureId, occurredAt])
+}
+
+// ============================================================
+// PART 8B — DATA-FIRST PREPARATION SHEETS
+// ============================================================
+// Replaces the legacy PrintProcedureOutput.aspx with a data-driven template
+// system. Each procedure type has one or more template versions; each case
+// instantiates a sheet from the active template. When the legacy ASPX source
+// is uploaded later, we add a `renderer` column to layer rendering modes
+// (web | pdf | dld-xml) without changing the data model.
+// ============================================================
+
+// B1 — Preparation Sheet Template (one per procedure type + version)
+model PreparationSheetTemplate {
+  id                    String   @id @default(cuid())
+  procedureCatalogId    String
+  procedureCatalog     ProcedureCatalog @relation(fields: [procedureCatalogId], references: [id])
+  version               Int      @default(1)
+  isActive              Boolean  @default(true)
+  // JSON schema of sections + fields. Shape documented in
+  // scripts/seed-preparation-templates.ts. Sections contain fields with
+  // type/required/label_en/label_ar/options/pattern/readonly/computed props.
+  templateJson          String
+  // Optional: render mode hint for future renderer layer
+  // (web | pdf | dld-xml). Default "web" until the ASPX source is uploaded
+  // and we layer rendering modes.
+  renderer              String   @default("web")
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  sheets                PreparationSheet[]
+
+  @@unique([procedureCatalogId, version])
+  @@index([procedureCatalogId, isActive])
+}
+
+// B2 — Preparation Sheet (one per case, filled by officer)
+// When the officer opens the case's prep-sheet tab, the system loads the
+// active template + any existing filled data. On submit, the filledDataJson
+// is persisted and status moves draft → submitted → verified.
+model PreparationSheet {
+  id                    String   @id @default(cuid())
+  caseId                String
+  case                  Case     @relation(fields: [caseId], references: [id])
+  templateId            String
+  template              PreparationSheetTemplate @relation(fields: [templateId], references: [id])
+  // JSON of field key → value. Matches the template's templateJson schema.
+  filledDataJson        String   @default("{}")
+  // draft | submitted | verified. Draft = officer is filling; submitted =
+  // officer locked it for auditor review; verified = auditor signed off.
+  status                String   @default("draft")
+  submittedBy           String?
+  submittedAt           DateTime?
+  verifiedBy            String?
+  verifiedAt            DateTime?
+  // Optional: rejection reason if the auditor sends it back for changes
+  rejectionReason       String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@index([caseId, status])
+}
+
+// ============================================================
+// PART 12 — POLICY & REGULATION KNOWLEDGE BASE
+// ============================================================
+// Admin uploads regulatory documents (DLD circulars, RERA decisions, trustee
+// SOPs, fee schedules). The system extracts text, chunks it, (later: embeds
+// it + extracts structured rules + generates advisories against live data).
+//
+// Human-in-the-loop: AI never applies changes directly. Every advisory
+// must be approved by a named admin before it's applied.
+//
+// Four models:
+//   KnowledgeDoc    — the uploaded document (metadata + file path + hash)
+//   DocChunk        — text chunks for search/re-analysis
+//   ExtractedRule   — structured rules extracted by LLM (fee rates, required
+//                     docs, workflow steps, thresholds, deadlines)
+//   Advisory        — diff recommendations against live data, with approve/
+//                     reject/apply workflow
+// ============================================================
+
+model KnowledgeDoc {
+  id              String   @id @default(cuid())
+  title           String
+  docType         String   // policy | circular | procedure_manual | fee_schedule | article | regulation
+  issuer          String?  // DLD | RERA | Dubai Municipality | Trustee Office | Other
+  language        String   @default("en")  // en | ar | bilingual
+  effectiveDate   DateTime?
+  // Supersession chain — when a newer doc replaces this one
+  supersededAt    DateTime?
+  supersededBy    String?  // FK to KnowledgeDoc.id (nullable — not a relation to avoid self-ref complexity)
+  filePath        String
+  fileHash        String   @unique  // SHA-256 — dedupe identical uploads
+  fileSize        Int
+  mimeType        String
+  status          String   @default("uploaded")  // uploaded | extracting | extracted | indexed | failed
+  extractionError String?
+  uploadedBy      String
+  uploadedAt      DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Part 12B-REG — regulation library metadata
+  sourceUrl       String?   // original URL where the regulation was fetched from
+  sourceType      String?   // pdf | html | pdf_disk | manual
+  jurisdiction    String?   // DLD | RERA | Dubai Municipality | UAE Federal
+  relatedDocId    String?   // FK to another KnowledgeDoc (cross-reference, e.g. amending law)
+  libraryCategory String?   // fees | mortgage | oqood | brokerage | inheritance | general | compendium
+
+  chunks          DocChunk[]
+  extractedRules  ExtractedRule[]
+
+  @@index([docType, status])
+  @@index([issuer, effectiveDate])
+  @@index([libraryCategory])
+}
+
+model DocChunk {
+  id             String   @id @default(cuid())
+  docId          String
+  doc            KnowledgeDoc @relation(fields: [docId], references: [id], onDelete: Cascade)
+  sequence       Int      // ordering within doc
+  pageNumber     Int?
+  sectionHeading String?
+  text           String   // the chunk text
+  tokenCount     Int
+  // Embedding stored as JSON array of floats (null until embedded in Part 12B)
+  embedding      String?
+  createdAt      DateTime @default(now())
+
+  @@index([docId, sequence])
+  @@index([docId, pageNumber])
+}
+
+model ExtractedRule {
+  id             String   @id @default(cuid())
+  docId          String
+  doc            KnowledgeDoc @relation(fields: [docId], references: [id], onDelete: Cascade)
+  ruleType       String   // fee_rate | required_doc | workflow_step | threshold | deadline | procedure_def
+  subjectCode    String?  // e.g. "SALE-001" or "DLD_REGISTRATION_SALE" if matched
+  payload        String   // JSON — the extracted structured data
+  sourceChunkIds String   // JSON array of DocChunk.id (provenance)
+  confidence     Float    // 0.0 – 1.0
+  createdAt      DateTime @default(now())
+
+  @@index([docId])
+  @@index([ruleType, subjectCode])
+}
+
+model Advisory {
+  id             String   @id @default(cuid())
+  title          String
+  advisoryType   String   // fee_change | doc_change | workflow_change | procedure_gap | procedure_deprecation | threshold_change
+  severity       String   // info | warning | critical
+  currentState   String   // JSON — what the system currently has
+  proposedState  String   // JSON — what the policy says it should be
+  rationale      String   // human-readable explanation
+  sourceRuleIds  String   // JSON array of ExtractedRule.id
+  sourceCitations String  // JSON — [{ docId, page, snippet }]
+  confidence     Float
+  status         String   @default("pending")  // pending | approved | rejected | superseded
+  reviewedBy     String?
+  reviewedAt     DateTime?
+  reviewNotes    String?
+  appliedAt      DateTime?  // set when approved change is deployed
+  createdAt      DateTime @default(now())
+
+  @@index([status, severity])
+  @@index([advisoryType])
+}
+
+
+
+// Part 12B — Extraction metrics (operational data for LLM extraction)
+model ExtractionMetric {
+  id              String   @id @default(cuid())
+  docId           String
+  chunkCount      Int
+  rulesExtracted  Int      // before dedup
+  rulesAfterDedup Int      // after dedup
+  avgConfidence   Float
+  durationMs      Int
+  modelUsed       String
+  timedOutChunks  Int
+  promptVersion   String
+  createdAt       DateTime @default(now())
+
+  @@index([docId])
+  @@index([createdAt])
+}
+
+// Enhancement 4 — Happiness Feedback System
+model FeedbackEntry {
+  id                String   @id @default(cuid())
+  branchId          String?
+  caseId            String?
+  transactionType   String
+  sourceType        String   // internal | client
+  sourceUserId      String?
+  sourceClientId    String?
+  rating            Int      // 1-5
+  category          String   // speed | clarity | accuracy | communication | overall
+  comment           String?
+  tags              String   @default("[]") // JSON array
+  status            String   @default("new") // new | acknowledged | in_review | resolved | dismissed
+  assignedToUserId  String?
+  resolutionNote    String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  resolvedAt        DateTime?
+
+  @@index([branchId, status])
+  @@index([sourceType, category])
+  @@index([caseId])
+  @@index([status, createdAt])
+}
+
+// ============================================================
+// IDP FOUNDATION — Intelligent Document Processing (v0.6.0)
+// Additive: 4 new models, no changes to existing models.
+// Non-destructive: IDP proposes; humans approve. No auto-state-change.
+// Every IDP action writes to the audit hash chain.
+// ============================================================
+
+model IdpPreprocessJob {
+  id              String   @id @default(cuid())
+  inputHash       String
+  inputMime       String
+  outputHash      String?
+  outputPath      String?
+  toolChain       String   // "sharp" | "libreoffice" | "ghostscript" | "pdfjs-text" | "passthrough" | "tool_missing"
+  status          String   // PENDING | DONE | FAILED | TOOL_MISSING
+  errorMessage    String?
+  latencyMs       Int?
+  createdAt       DateTime @default(now())
+
+  @@index([inputHash])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model IdpExtraction {
+  id              String   @id @default(cuid())
+  documentId      String
+  preprocessJobId String
+  docType         String   // emirates_id | trade_license | receipt | title_deed | contract | legal_review | shareholder_agreement | passport | noc | unknown
+  schemaVersion   String
+  extractedJson   String
+  fieldConfidence String
+  modelName       String
+  modelDigest     String?
+  latencyMs       Int
+  overallConf    Float
+  status          String   // PENDING | EXTRACTED | LOW_CONFIDENCE | FAILED
+  createdAt       DateTime @default(now())
+
+  @@index([documentId])
+  @@index([status])
+  @@index([docType])
+}
+
+model IdpValidationFlag {
+  id               String   @id @default(cuid())
+  caseId           String
+  documentId       String?
+  extractionId     String?
+  flagType         String   // MISSING_FIELD | FORMAT_ERROR | CROSS_DOC_MISMATCH | FEE_MISMATCH | POLICY_VIOLATION | EXPIRED_DOCUMENT
+  severity         String   // INFO | WARNING | BLOCKING
+  details          String   // JSON
+  status           String   // OPEN | RESOLVED | DISMISSED
+  resolvedByUserId String?
+  resolvedAt       DateTime?
+  resolutionNote   String?
+  createdAt        DateTime @default(now())
+
+  @@index([caseId, status])
+  @@index([severity])
+  @@index([createdAt])
+}
+
+model IdpPolicyCheck {
+  id              String   @id @default(cuid())
+  extractionId    String
+  policyVersionId String
+  ruleEvaluated   String
+  passed          Boolean
+  evidence        String   // JSON
+  createdAt       DateTime @default(now())
+
+  @@index([extractionId])
+  @@index([policyVersionId])
+}
